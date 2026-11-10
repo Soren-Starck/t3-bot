@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+  <img src="docs/logo.png" width="96" alt="T3 Bot app icon: three bot faces">
+</picture>
+
 # T3 Bot
 
 T3 Bot is an iPhone app for people who run agents in [T3 Code](https://github.com/pingdotgg/t3code). Each agent you care about becomes a contact with a face, and the app keeps one ranked list of what needs you, so a question from an agent reaches your lock screen and you can answer it there.
