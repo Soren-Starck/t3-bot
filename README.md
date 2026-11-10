@@ -9,7 +9,10 @@
 
 <p align="center">An unofficial iPhone app for <a href="https://github.com/pingdotgg/t3code">T3 Code</a>, written from scratch as a simpler alternative to its own mobile app. Each bot is a T3 Code thread you chat with like a contact, in the spirit of agent apps like xAI's Grok Bot, and one ranked list shows what needs you, so an agent's question reaches your lock screen and you can answer it there.</p>
 
-<img src="docs/screenshots/hero.png" width="820" alt="T3 Bot on three iPhones: the home screen with the bots and what needs you, a conversation with a bot, and an approval card with its checks and buttons">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-dark.png">
+  <img src="docs/screenshots/hero-light.png" width="820" alt="T3 Bot on three iPhones: the home screen with the bots and what needs you, a conversation with a bot, and an approval card with its checks and buttons">
+</picture>
 
 ## Set it up with your agent
 
@@ -53,8 +56,14 @@ What it does:
 Settings, behind the gear on the home screen, holds the connection, notifications and a test push, quiet hours, the morning brief, the calendar and contacts you share with your bots, and your quick replies. Quick replies are short answers you save once, such as "Yes, go ahead". They show under a bot's message when it asks you something and suggests no replies of its own.
 
 <p>
-  <img src="docs/screenshots/review.png" width="260" alt="Review, one card at a time">
-  <img src="docs/screenshots/settings.png" width="260" alt="Settings: the connection, notifications and quiet hours">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/review-dark.png">
+    <img src="docs/screenshots/review.png" width="260" alt="Review, one card at a time">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/settings-dark.png">
+    <img src="docs/screenshots/settings.png" width="260" alt="Settings: the connection, notifications and quiet hours">
+  </picture>
 </p>
 
 ## Use it with your T3 Code
@@ -80,7 +89,10 @@ open ios/T3Bot.xcodeproj
 
 Run it on the phone and scan the QR code from the app's connect screen. `t3bot pair` prints the code again.
 
-<img src="docs/screenshots/connect.png" width="260" alt="The connect screen">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/connect-dark.png">
+  <img src="docs/screenshots/connect.png" width="260" alt="The connect screen">
+</picture>
 
 ## How it talks to T3 Code
 
@@ -113,7 +125,10 @@ t3bot notify --kind approve --title "Deploy 2.4.1 to production?" \
   --action "Deploy=Run the production deploy for 2.4.1"
 ```
 
-<img src="docs/screenshots/card.png" width="260" alt="A card with its checks and its buttons">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/card-dark.png">
+  <img src="docs/screenshots/card.png" width="260" alt="A card with its checks and its buttons">
+</picture>
 
 A **card source** is a command that prints a list of cards as JSON, such as your to-do list or your open pull requests. A **handler** is a command that a card's button runs on your Mac. Both are a few lines in the config file. The format and copyable examples are in [docs/CARDS.md](docs/CARDS.md).
 
