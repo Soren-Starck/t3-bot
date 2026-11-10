@@ -274,7 +274,8 @@ type Card = {
 
 /**
  * What each source last said. The list commands run beside the server, never inside a request: a slow or hanging
- * adapter delays its own cards, not the app. A source that fails keeps its last good list and is tried again later.
+ * adapter delays the cards (its own, and the other sources' until its timeout), not the app. A source that fails
+ * keeps its last good list and is tried again later.
  */
 type SourceState = { at: number; cards: Card[]; loaded: boolean; failedAt: number; saidAt: number; running: Promise<void> | null }
 const sourceState = new Map<string, SourceState>()
@@ -349,12 +350,23 @@ function toCards(src: SourceConf, raw: any[]): Card[] {
   })
 }
 
+/**
+ * Source commands (list and done) run one at a time, in the order they were asked for. Sources are someone's
+ * scripts and may share a state file: two at once can lose a write, or fail on the other's temporary file.
+ */
+let sourceTurn: Promise<unknown> = Promise.resolve()
+function inTurn<T>(job: () => Promise<T>): Promise<T> {
+  const mine = sourceTurn.then(job, job)
+  sourceTurn = mine.catch(() => {})
+  return mine
+}
+
 /** Runs one source's list command. Asked twice at once, it runs once. */
 function refreshSource(src: SourceConf): Promise<void> {
   const st = stateOf(src.id)
   if (st.running) return st.running
   st.running = (async () => {
-    const r = await run(expandArgv(src.list), { timeout: Number(src.timeout) > 0 ? Number(src.timeout) : 60 })
+    const r = await inTurn(() => run(expandArgv(src.list), { timeout: Number(src.timeout) > 0 ? Number(src.timeout) : 60 }))
     let raw: unknown = null
     try { raw = JSON.parse(r.out).cards } catch {}
     if (Array.isArray(raw)) {
@@ -610,7 +622,7 @@ async function cardAction(id: string, action: string, body: any): Promise<{ ok: 
     if (card.source === 'desk') {
       const src = cfg().sources.find((x) => x.id === (card as any).srcId)
       if (!src?.done?.length) return { ok: false, error: 'this source cannot mark cards done' }
-      const r = await run(expandArgv(src.done).map((x) => x.replace('{id}', String((card as any).local))), { timeout: Number(src.timeout) > 0 ? Number(src.timeout) : 30 })
+      const r = await inTurn(() => run(expandArgv(src.done).map((x) => x.replace('{id}', String((card as any).local))), { timeout: Number(src.timeout) > 0 ? Number(src.timeout) : 30 }))
       record('done', { id, rc: r.code })
       if (r.code !== 0) return { ok: false, error: (r.err.trim() || r.out.trim()).slice(-300) || 'the source could not mark it done' }
       // Gone from the list at once, then the source is read again so the app sees what it says now.
