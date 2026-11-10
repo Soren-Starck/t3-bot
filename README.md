@@ -7,7 +7,7 @@
 
 <h1 align="center">T3 Bot</h1>
 
-<p align="center">An unofficial iPhone app for <a href="https://github.com/pingdotgg/t3code">T3 Code</a>, in the style of Grok Bot. Each bot is a T3 Code thread you chat with like a contact, and when an agent needs you, you answer from your lock screen.</p>
+<p align="center">An unofficial iPhone app for <a href="https://github.com/pingdotgg/t3code">T3 Code</a>, made to sit alongside its official app, not to replace it. Each bot is a T3 Code thread you chat with like a contact, in the style of Grok Bot, and when an agent needs you, you answer from your lock screen.</p>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-dark.png">
@@ -38,7 +38,7 @@ You do what only you can: sign in to Xcode with a paid Apple Developer account, 
 
 ## Good to know
 
-- **Simpler than T3 Code's own app, on purpose.** That one is a full client: projects, diffs, a terminal, files. T3 Bot shows only your bots and what waits on you. It was written from scratch, not forked.
+- **Alongside T3 Code's own app, not instead of it.** Theirs is the full client: projects, diffs, a terminal, files, every thread. T3 Bot does one job next to it: your bots, and what waits on you. It was written from scratch, not forked.
 - **No model of its own.** Unlike Grok Bot, you talk to the agent T3 Code runs in each thread.
 - **You build it yourself.** There is no TestFlight build. You need a Mac running T3 Code with [Bun](https://bun.sh), Xcode 27, an iPhone on iOS 26 and a paid Apple Developer account. Tailscale lets the phone reach the server away from home.
 - **Local.** The server runs on your Mac. Nothing leaves your machines except Apple's pushes.
