@@ -2,6 +2,8 @@
 
 This takes you from a fresh clone to an iPhone that rings when an agent needs you. Plan for about 30 minutes, most of it in Xcode and on developer.apple.com.
 
+To have your coding agent do it, paste the prompt from the [README](../README.md#set-it-up-with-your-agent); it follows [AGENT-SETUP.md](AGENT-SETUP.md).
+
 If you only want to look at the app, the demo in the [README](../README.md#try-it-in-five-minutes) needs none of this.
 
 ## What you need

@@ -11,6 +11,17 @@
 
 <img src="docs/screenshots/hero.png" width="820" alt="T3 Bot on three iPhones: the home screen with the bots and what needs you, a conversation with a bot, and an approval card with its checks and buttons">
 
+## Set it up with your agent
+
+Paste this into Claude Code, Codex or a T3 Code thread, on the Mac that runs T3 Code:
+
+```text
+Set up T3 Bot on this Mac for me: https://github.com/Soren-Starck/t3-bot
+Clone it somewhere permanent and follow docs/AGENT-SETUP.md from the clone, step by step. Run every command you can yourself, and stop to tell me exactly what to do when a step needs me (my Apple account, Xcode, my iPhone). Keep the pairing token out of this chat.
+```
+
+The agent checks your Mac, installs the server, makes your first bot, builds the app with your Apple team and sets up pushes, following [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md). You do the parts only you can: sign in to Xcode with a paid Apple Developer account, plug in your iPhone, create a push key on developer.apple.com and scan the pairing code. To look at the app before installing anything, try the demo below.
+
 ## Try it in five minutes
 
 The demo is a pretend server with made-up bots that answer everything, and the app in the iPhone simulator. It needs no T3 Code, no account and no signing, only a Mac with [Bun](https://bun.sh), Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
@@ -67,7 +78,7 @@ Settings, behind the gear on the home screen, holds the connection, notification
 
 ## Use it with your T3 Code
 
-The full walkthrough is in [docs/SETUP.md](docs/SETUP.md). The short version:
+The quickest way is [the agent prompt](#set-it-up-with-your-agent) above. To do it by hand, the full walkthrough is in [docs/SETUP.md](docs/SETUP.md). The short version:
 
 On the Mac that runs T3 Code, with T3 Code open:
 
@@ -128,6 +139,7 @@ A **card source** is a command that prints a list of cards as JSON, such as your
 ## Docs
 
 - [docs/SETUP.md](docs/SETUP.md): install, signing with your own team, the push key, pairing, troubleshooting.
+- [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md): the same setup as steps for a coding agent.
 - [docs/CARDS.md](docs/CARDS.md): `t3bot notify`, the card format, sources and handlers.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the pieces and how they fit.
 - [CONTRIBUTING.md](CONTRIBUTING.md)
