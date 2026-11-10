@@ -1,0 +1,54 @@
+{
+  "user": { "name": "Alex" },
+  "chief": "chief",
+  "defaults": { "model": "claude-opus-5-5", "effort": "high", "runtimeMode": "full-access" },
+  "environmentId": "",
+  "projectId": "<the T3 Code project your bots live in; `t3bot setup` fills this in>",
+  "night": { "from": "23:00", "to": "08:00" },
+  "digestAt": "20:00",
+  "keepDays": 180,
+  "agents": [
+    {
+      "id": "chief",
+      "name": "Chief",
+      "role": "First contact. Takes everything no other bot owns.",
+      "threadId": "<thread id; `t3bot setup` creates the thread and fills this in>",
+      "watch": [],
+      "kind": "bot",
+      "face": { "skin": "902" }
+    },
+    {
+      "id": "releases",
+      "name": "Releases",
+      "role": "Builds, release notes and what is waiting to ship.",
+      "threadId": "<thread id>",
+      "watch": ["#RELEASE"],
+      "kind": "bot",
+      "face": { "skin": "102" }
+    },
+    {
+      "id": "launch",
+      "name": "Launch",
+      "role": "Group: Chief, Releases",
+      "threadId": "<thread id>",
+      "watch": [],
+      "kind": "group",
+      "members": ["chief", "releases"],
+      "face": { "skin": "101" }
+    }
+  ],
+  "sources": [
+    {
+      "id": "todo",
+      "name": "To-do",
+      "agent": "chief",
+      "list": ["python3", "~/.config/t3bot/adapters/todo.py", "list"],
+      "done": ["python3", "~/.config/t3bot/adapters/todo.py", "done", "{id}"],
+      "ttl": 30,
+      "timeout": 60
+    }
+  ],
+  "handlers": {
+    "example-approve": { "cmd": ["~/.config/t3bot/adapters/approve.sh"], "timeout": 300 }
+  }
+}

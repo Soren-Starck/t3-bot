@@ -1,0 +1,199 @@
+# XcodeGen spec; the .xcodeproj is generated, never committed.
+#   cd ios && xcodegen generate
+#
+# Team, bundle identifier and signing are build settings from Config/T3Bot.xcconfig (the T3BOT_ names).
+# To build with your own team, run scripts/setup.sh: it writes your values to Config/Local.xcconfig, which is
+# not committed, so this file never needs editing for that.
+name: T3Bot
+options:
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+configFiles:
+  Debug: Config/T3Bot.xcconfig
+  Release: Config/T3Bot.xcconfig
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: $(T3BOT_TEAM)
+    CODE_SIGN_STYLE: $(T3BOT_SIGN_STYLE)
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+
+# In every target:
+# - T3BotURL and T3BotToken: a connection the build carries (Config/Local.xcconfig). Empty in a plain clone,
+#   and the app then opens on its connect screen. A pairing made in the app always comes first.
+# - T3BotKeychainGroup and the keychain-access-groups entitlement: the Keychain group the app shares with
+#   its extensions, where a pairing is mirrored so they can read it (Shared/Connection.swift), and the
+#   bots' faces with it (Shared/SharedFaces.swift). It follows the team and T3BOT_BUNDLE_ID, like every
+#   bundle identifier below, so one pair of settings moves all of them together.
+# - NSAllowsLocalNetworking: lets the app reach a server by plain http on the same network (an IP address,
+#   localhost or a .local name), which is how the demo and a server without HTTPS are reached. Any other
+#   host still needs HTTPS.
+targets:
+  T3Bot:
+    type: application
+    platform: iOS
+    sources:
+      - path: T3Bot
+        excludes: [BoopFace/*]
+      - path: T3Bot/BoopFace
+        buildPhase: resources
+      - path: Shared
+    dependencies:
+      - target: T3BotNotify
+        embed: true
+      - target: T3BotWidgets
+        embed: true
+      - target: T3BotShare
+        embed: true
+    info:
+      path: T3Bot/Info.plist
+      properties:
+        CFBundleDisplayName: T3 Bot
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleDevelopmentRegion: en
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ITSAppUsesNonExemptEncryption: false
+        T3BotURL: $(T3BOT_URL)
+        T3BotToken: $(T3BOT_TOKEN)
+        T3BotKeychainGroup: $(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared
+        T3BotAPNSEnv: sandbox
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        LSApplicationQueriesSchemes: [t3code]
+        NSUserActivityTypes: [INSendMessageIntent]
+        NSSupportsLiveActivities: true
+        NSFaceIDUsageDescription: T3 Bot asks for Face ID before an action you marked as needing it, such as a payment or a release.
+        NSCameraUsageDescription: T3 Bot uses the camera to scan the pairing code your Mac shows.
+        NSLocalNetworkUsageDescription: T3 Bot connects to your T3 Bot server when it is on the same network as this phone.
+        NSCalendarsFullAccessUsageDescription: Your bots read your calendar to plan around it, and can propose events you add yourself.
+        NSContactsUsageDescription: Your bots look up who a draft message is for. Nothing is sent without you.
+        CFBundleURLTypes:
+          - CFBundleURLName: $(T3BOT_BUNDLE_ID)
+            CFBundleURLSchemes: [t3bot]
+    entitlements:
+      path: T3Bot/T3Bot.entitlements
+      properties:
+        aps-environment: development
+        com.apple.developer.usernotifications.time-sensitive: true
+        com.apple.developer.usernotifications.communication: true
+        keychain-access-groups: ["$(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(T3BOT_BUNDLE_ID)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Signing comes from the xcconfig: Automatic with no team in a plain clone, and whatever
+        # scripts/setup.sh or Config/Local.xcconfig says after that (Automatic with your team, or Manual
+        # with named profiles). A simulator build needs no profile, so the names only apply to device builds.
+        CODE_SIGN_STYLE: $(T3BOT_SIGN_STYLE)
+        CODE_SIGN_IDENTITY: $(T3BOT_SIGN_IDENTITY)
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": $(T3BOT_PROFILE_APP)
+
+  # Shows each push as sent by its bot: the bot's face instead of the app icon (communication notifications).
+  T3BotNotify:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: T3BotNotify
+      - path: Shared/Connection.swift
+      - path: Shared/SharedFaces.swift
+    info:
+      path: T3BotNotify/Info.plist
+      properties:
+        CFBundleDisplayName: T3 Bot Notifications
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        T3BotURL: $(T3BOT_URL)
+        T3BotToken: $(T3BOT_TOKEN)
+        T3BotKeychainGroup: $(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: T3BotNotify/T3BotNotify.entitlements
+      properties:
+        keychain-access-groups: ["$(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(T3BOT_BUNDLE_ID).notify
+        CODE_SIGN_STYLE: $(T3BOT_SIGN_STYLE)
+        CODE_SIGN_IDENTITY: $(T3BOT_SIGN_IDENTITY)
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": $(T3BOT_PROFILE_NOTIFY)
+
+  # Home and lock screen widgets, and the Live Activity of a bot at work.
+  T3BotWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: T3BotWidgets
+      - path: Shared
+    info:
+      path: T3BotWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: T3 Bot
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        T3BotURL: $(T3BOT_URL)
+        T3BotToken: $(T3BOT_TOKEN)
+        T3BotKeychainGroup: $(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: T3BotWidgets/T3BotWidgets.entitlements
+      properties:
+        keychain-access-groups: ["$(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(T3BOT_BUNDLE_ID).widgets
+        CODE_SIGN_STYLE: $(T3BOT_SIGN_STYLE)
+        CODE_SIGN_IDENTITY: $(T3BOT_SIGN_IDENTITY)
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": $(T3BOT_PROFILE_WIDGETS)
+
+  # T3 Bot in the share sheet: a link, text or images from any app to a bot.
+  T3BotShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: T3BotShare
+      - path: Shared/Connection.swift
+      - path: Shared/SharedFaces.swift
+    info:
+      path: T3BotShare/Info.plist
+      properties:
+        CFBundleDisplayName: T3 Bot
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        T3BotURL: $(T3BOT_URL)
+        T3BotToken: $(T3BOT_TOKEN)
+        T3BotKeychainGroup: $(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsImageWithMaxCount: 4
+    entitlements:
+      path: T3BotShare/T3BotShare.entitlements
+      properties:
+        keychain-access-groups: ["$(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(T3BOT_BUNDLE_ID).share
+        CODE_SIGN_STYLE: $(T3BOT_SIGN_STYLE)
+        CODE_SIGN_IDENTITY: $(T3BOT_SIGN_IDENTITY)
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": $(T3BOT_PROFILE_SHARE)

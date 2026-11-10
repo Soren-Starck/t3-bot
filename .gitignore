@@ -1,0 +1,9 @@
+ios/Config/Local.xcconfig
+ios/*.xcodeproj
+ios/build/
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+# A bot's own face picture, drawn by the server when the bot is made in the app. The stock ones in avatars/skins are tracked.
+/avatars/*.png

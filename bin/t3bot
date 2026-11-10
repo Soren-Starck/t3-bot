@@ -1,0 +1,4 @@
+#!/bin/zsh
+# Wrapper so `t3bot` works from any shell, launchd job or agent: finds bun, runs bin/t3bot.ts.
+for b in "$(command -v bun 2>/dev/null)" ~/.bun/bin/bun /opt/homebrew/bin/bun; do [[ -x "$b" ]] && exec "$b" "${0:A:h}/t3bot.ts" "$@"; done
+echo "t3bot: bun was not found. Install it (https://bun.sh), then try again." >&2; exit 2

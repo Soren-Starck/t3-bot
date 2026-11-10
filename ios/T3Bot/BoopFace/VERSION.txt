@@ -1,0 +1,2 @@
+BoopFace 41bd8527addd90a499fe3c0ea17b6af2863bc4d6 (Sun Nov 8 12:06:23 2026 +0800)
+  "version": "0.8.0",
