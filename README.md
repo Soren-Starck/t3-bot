@@ -17,7 +17,10 @@ Paste this into Claude Code, Codex or a T3 Code thread, on the Mac that runs T3 
 
 ```text
 Set up T3 Bot on this Mac for me: https://github.com/Soren-Starck/t3-bot
-Clone it somewhere permanent and follow docs/AGENT-SETUP.md from the clone, step by step. Run every command you can yourself, and stop to tell me exactly what to do when a step needs me (my Apple account, Xcode, my iPhone). Keep the pairing token out of this chat.
+Clone it somewhere permanent and follow docs/AGENT-SETUP.md from the
+clone, step by step. Run every command you can yourself, and stop to
+tell me exactly what to do when a step needs me (my Apple account,
+Xcode, my iPhone). Keep the pairing token out of this chat.
 ```
 
 The agent checks your Mac, installs the server, makes your first bot, builds the app with your Apple team and sets up pushes, following [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md). You do the parts only you can: sign in to Xcode with a paid Apple Developer account, plug in your iPhone, create a push key on developer.apple.com and scan the pairing code. To look at the app before installing anything, try the demo below.
