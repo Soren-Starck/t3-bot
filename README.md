@@ -23,29 +23,7 @@ tell me exactly what to do when a step needs me (my Apple account,
 Xcode, my iPhone). Keep the pairing token out of this chat.
 ```
 
-The agent checks your Mac, installs the server, makes your first bot, builds the app with your Apple team and sets up pushes, following [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md). You do the parts only you can: sign in to Xcode with a paid Apple Developer account, plug in your iPhone, create a push key on developer.apple.com and scan the pairing code. To look at the app before installing anything, try the demo below.
-
-## Try it in five minutes
-
-The demo is a pretend server with made-up bots that answer everything, and the app in the iPhone simulator. It needs no T3 Code, no account and no signing, only a Mac with [Bun](https://bun.sh), Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
-
-```sh
-git clone https://github.com/Soren-Starck/t3-bot
-cd t3-bot
-bin/t3bot demo
-```
-
-Leave it running. In a second terminal, open the app in Xcode:
-
-```sh
-cd t3-bot/ios
-xcodegen generate
-open T3Bot.xcodeproj
-```
-
-Choose the `T3Bot` scheme and an iPhone simulator, then Run. On the connect screen, open "No server yet? Try the demo" and tap "Connect to the demo on this Mac". Send a bot a message and it answers a few seconds later.
-
-`t3bot demo` also prints a QR code and a pairing link, for an app that is already on a phone on the same Wi-Fi. Nothing is saved when it stops, and it sends no pushes, so notifications are the one part the demo cannot show.
+The agent checks your Mac, installs the server, makes your first bot, builds the app with your Apple team and sets up pushes, following [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md). You do the parts only you can: sign in to Xcode with a paid Apple Developer account, plug in your iPhone, create a push key on developer.apple.com and scan the pairing code. To look at the app before installing anything, there is [a demo](#the-demo).
 
 ## What it is
 
@@ -138,6 +116,18 @@ t3bot notify --kind approve --title "Deploy 2.4.1 to production?" \
 <img src="docs/screenshots/card.png" width="260" alt="A card with its checks and its buttons">
 
 A **card source** is a command that prints a list of cards as JSON, such as your to-do list or your open pull requests. A **handler** is a command that a card's button runs on your Mac. Both are a few lines in the config file. The format and copyable examples are in [docs/CARDS.md](docs/CARDS.md).
+
+## The demo
+
+To see the app before installing anything: a pretend server with made-up bots that answer everything, and the app in the iPhone simulator. It needs no T3 Code, no Apple account and no signing, only [Bun](https://bun.sh), Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+
+```sh
+git clone https://github.com/Soren-Starck/t3-bot
+cd t3-bot
+bin/t3bot demo
+```
+
+Leave it running. In a second terminal, run `cd t3-bot/ios && xcodegen generate && open T3Bot.xcodeproj`, then run the `T3Bot` scheme on an iPhone simulator. On the connect screen, open "No server yet? Try the demo" and tap "Connect to the demo on this Mac". The demo saves nothing and sends no pushes.
 
 ## Docs
 

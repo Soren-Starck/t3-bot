@@ -4,7 +4,7 @@ This takes you from a fresh clone to an iPhone that rings when an agent needs yo
 
 To have your coding agent do it, paste the prompt from the [README](../README.md#set-it-up-with-your-agent); it follows [AGENT-SETUP.md](AGENT-SETUP.md).
 
-If you only want to look at the app, the demo in the [README](../README.md#try-it-in-five-minutes) needs none of this.
+If you only want to look at the app, the demo in the [README](../README.md#the-demo) needs none of this.
 
 ## What you need
 
