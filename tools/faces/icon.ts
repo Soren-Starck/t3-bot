@@ -29,7 +29,7 @@ for (const [file, bg, filter, bots] of variants) {
 }
 // The README's logo: the light and dark icons at 256 px with rounded corners and a thin border in GitHub's colors.
 for (const [file, logo, border] of [['icon.png', 'logo.png', '#d0d7de'], ['icon-dark.png', 'logo-dark.png', '#30363d']]) {
-  Bun.spawnSync(['magick', join(SET, file), '-resize', '256x256', '(', '-size', '256x256', 'xc:none', '-fill', 'white', '-draw', 'roundrectangle 0,0 255,255 57,57', ')',
+  Bun.spawnSync(['magick', join(SET, file), '-resize', '256x256', '-alpha', 'set', '(', '-size', '256x256', 'xc:none', '-fill', 'white', '-draw', 'roundrectangle 0,0 255,255 57,57', ')',
     '-compose', 'DstIn', '-composite', '-compose', 'Over', '-fill', 'none', '-stroke', border, '-strokewidth', '2', '-draw', 'roundrectangle 1,1 254,254 56,56',
     join(ROOT, 'docs', logo)])
   console.log('docs/' + logo)
