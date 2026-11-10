@@ -1,5 +1,6 @@
-// App icon: three bots (the gold Chief in front, a blue and a green one behind) on a flat background,
-// in the three iOS appearances: light, dark and tinted (grayscale; iOS applies the tint). bun tools/faces/icon.ts
+// App icon: three bots on a flat background, in the three iOS appearances. Light: a black Chief in front of a
+// blue and a green bot, on white. Dark: a white Chief in front of a blue and a purple bot, on near black.
+// Tinted: the dark one in grayscale (iOS applies the tint). bun tools/faces/icon.ts
 // Needs Google Chrome (or $CHROME naming a Chromium binary) and ImageMagick's `magick`.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -10,10 +11,14 @@ const lib = readFileSync(join(ROOT, 'ios/T3Bot/BoopFace/boopface.iife.js'), 'utf
 const SET = join(ROOT, 'ios/T3Bot/Assets.xcassets/AppIcon.appiconset')
 const face = (skin: string, size: number, x: number, y: number, z: number) =>
   `<boop-face skin="${skin}" size="${size}" motion="reduce" auto-sleep="0" style="position:absolute;left:${x}px;top:${y}px;z-index:${z}"></boop-face>`
-const bots = face('401', 430, 40, 300, 1) + face('403', 430, 554, 300, 1) + face('902', 600, 212, 300, 2)
-const variants: [string, string, string][] = [['icon.png', '#ffffff', ''], ['icon-dark.png', '#101014', ''], ['icon-tinted.png', '#000000', 'filter:grayscale(1) contrast(1.1)']]
+// Skins (tools/faces/skins.json): 101 Glaze Black, 206 Ice glass White, 401 Candy glass Blue, 403 Green, 404 Purple.
+const trio = (front: string, left: string, right: string) =>
+  face(left, 430, 40, 300, 1) + face(right, 430, 554, 300, 1) + face(front, 600, 212, 300, 2)
+const light = trio('101', '401', '403'), dark = trio('206', '401', '404')
+const variants: [string, string, string, string][] = [['icon.png', '#ffffff', '', light], ['icon-dark.png', '#101014', '', dark],
+  ['icon-tinted.png', '#000000', 'filter:grayscale(1) contrast(1.1)', dark]]
 const work = mkdtempSync(join(tmpdir(), 't3bot-icon-'))
-for (const [file, bg, filter] of variants) {
+for (const [file, bg, filter, bots] of variants) {
   const html = join(work, file + '.html')
   writeFileSync(html, `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:1024px;height:1024px;overflow:hidden;position:relative;background:${bg}}#c{position:absolute;inset:0;${filter}}</style></head><body><div id="c">${bots}</div><script>${lib}</script></body></html>`)
   const out = join(SET, file)
