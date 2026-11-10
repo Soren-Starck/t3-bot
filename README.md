@@ -1,12 +1,13 @@
-<h1>
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/app-icon-dark.png">
-  <img src="docs/app-icon.png" width="48" align="absmiddle" alt="T3 Bot app icon">
-</picture>
-T3 Bot
-</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/bots-dark.png">
+    <img src="docs/bots.png" width="200" alt="Three T3 Bot faces">
+  </picture>
+</p>
 
-T3 Bot is an iPhone app for people who run agents in [T3 Code](https://github.com/pingdotgg/t3code). Each agent you care about becomes a contact with a face, and the app keeps one ranked list of what needs you, so a question from an agent reaches your lock screen and you can answer it there.
+<h1 align="center">T3 Bot</h1>
+
+<p align="center">T3 Bot is an iPhone app for people who run agents in <a href="https://github.com/pingdotgg/t3code">T3 Code</a>. Each agent you care about becomes a contact with a face, and the app keeps one ranked list of what needs you, so a question from an agent reaches your lock screen and you can answer it there.</p>
 
 <img src="docs/screenshots/hero.png" width="820" alt="T3 Bot on three iPhones: the home screen with the bots and what needs you, a conversation with a bot, and an approval card with its checks and buttons">
 

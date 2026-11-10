@@ -1,6 +1,6 @@
 // App icon: three bots on a flat background, in the three iOS appearances. Light: a black Chief in front of a
 // blue and a green bot, on white. Dark: a white Chief in front of a blue and a purple bot, on near black.
-// Tinted: the dark one in grayscale (iOS applies the tint). Also writes the README's icon (docs/app-icon*.png).
+// Tinted: the dark one in grayscale (iOS applies the tint). Also writes the README's header picture (docs/bots*.png).
 // bun tools/faces/icon.ts
 // Needs Google Chrome (or $CHROME naming a Chromium binary) and ImageMagick's `magick`.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
@@ -27,11 +27,12 @@ for (const [file, bg, filter, bots] of variants) {
   Bun.spawnSync(['magick', out, '-background', bg, '-alpha', 'remove', '-alpha', 'off', out])
   console.log(file)
 }
-// The README's icon, beside the title: the light and dark icons at 256 px with rounded corners and a thin border in GitHub's colors.
-for (const [file, logo, border] of [['icon.png', 'app-icon.png', '#d0d7de'], ['icon-dark.png', 'app-icon-dark.png', '#30363d']]) {
-  Bun.spawnSync(['magick', join(SET, file), '-resize', '256x256', '-alpha', 'set', '(', '-size', '256x256', 'xc:none', '-fill', 'white', '-draw', 'roundrectangle 0,0 255,255 57,57', ')',
-    '-compose', 'DstIn', '-composite', '-compose', 'Over', '-fill', 'none', '-stroke', border, '-strokewidth', '2', '-draw', 'roundrectangle 1,1 254,254 56,56',
-    join(ROOT, 'docs', logo)])
+// The README's header: the same three bots with no tile, on a transparent background, trimmed to the bots.
+for (const [logo, bots] of [['bots.png', light], ['bots-dark.png', dark]]) {
+  const html = join(work, logo + '.html'), out = join(ROOT, 'docs', logo)
+  writeFileSync(html, `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:1024px;height:1024px;overflow:hidden;position:relative;background:transparent}</style></head><body>${bots}<script>${lib}</script></body></html>`)
+  Bun.spawnSync([CHROME, '--headless=new', `--user-data-dir=${join(work, 'p')}`, '--hide-scrollbars', '--default-background-color=00000000', '--window-size=1024,1024', '--virtual-time-budget=3000', `--screenshot=${out}`, `file://${html}`])
+  Bun.spawnSync(['magick', out, '-trim', '+repage', '-resize', '480x', out])
   console.log('docs/' + logo)
 }
 writeFileSync(join(SET, 'Contents.json'), JSON.stringify({ images: [
