@@ -2,9 +2,9 @@
 
 This takes you from a fresh clone to an iPhone that rings when an agent needs you. Plan for about 30 minutes, most of it in Xcode and on developer.apple.com.
 
-To have your coding agent do it, paste the prompt from the [README](../README.md#set-it-up-with-your-agent); it follows [AGENT-SETUP.md](AGENT-SETUP.md).
+To have your coding agent do it, paste the prompt from the [README](../README.md#set-it-up); it follows [AGENT-SETUP.md](AGENT-SETUP.md).
 
-If you only want to look at the app, the demo in the [README](../README.md#the-demo) needs none of this.
+If you only want to look at the app, [the demo](#the-demo) needs none of this.
 
 ## What you need
 
@@ -171,6 +171,11 @@ t3bot pair
 
 It prints a QR code and a link of the form `t3bot://connect?url=<server address>&token=<token>`. In the app's connect screen, scan the QR code. You can also scan it with the iPhone camera, open the link on the phone, or paste it into the connect screen.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="screenshots/connect-dark.png">
+  <img src="screenshots/connect.png" width="260" alt="The connect screen">
+</picture>
+
 | Option | Meaning |
 |---|---|
 | `--url <address>` | Use this address in the link |
@@ -304,6 +309,18 @@ The server keeps its own state in `~/.local/share/t3bot/`: a small SQLite file (
 - the record of which card button was tapped
 
 A note you have not read is never deleted. `t3bot setup` writes `"keepDays": 180` into a new config. A config without the key, or with 0, keeps everything forever. `T3BOT_KEEP_DAYS` in the server's environment wins over the config.
+
+## The demo
+
+To see the app before installing anything: a pretend server with made-up bots that answer everything, and the app in the iPhone simulator. It needs no T3 Code, no Apple account and no signing, only Bun, Xcode 27 and XcodeGen.
+
+```sh
+git clone https://github.com/Soren-Starck/t3-bot
+cd t3-bot
+bin/t3bot demo
+```
+
+Leave it running. In a second terminal, run `cd t3-bot/ios && xcodegen generate && open T3Bot.xcodeproj`, then run the `T3Bot` scheme on an iPhone simulator. On the connect screen, open "No server yet? Try the demo" and tap "Connect to the demo on this Mac". The demo saves nothing and sends no pushes.
 
 ## Uninstall
 

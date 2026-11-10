@@ -2,6 +2,11 @@
 
 A card is one thing that needs you. The app shows every card in one list, most urgent first, and under the bot it belongs to.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="screenshots/card-dark.png">
+  <img src="screenshots/card.png" width="260" alt="A card with its checks and its buttons">
+</picture>
+
 Cards come from three places:
 
 | Where | How it gets there | Example |
