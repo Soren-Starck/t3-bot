@@ -7,7 +7,7 @@
 
 <h1 align="center">T3 Bot</h1>
 
-<p align="center">T3 Bot is an iPhone app for people who run agents in <a href="https://github.com/pingdotgg/t3code">T3 Code</a>. Each agent you care about becomes a contact with a face, and the app keeps one ranked list of what needs you, so a question from an agent reaches your lock screen and you can answer it there.</p>
+<p align="center">An unofficial iPhone app for <a href="https://github.com/pingdotgg/t3code">T3 Code</a>, written from scratch as a simpler alternative to its own mobile app. Each bot is a T3 Code thread you chat with like a contact, in the spirit of agent apps like xAI's Grok Bot, and one ranked list shows what needs you, so an agent's question reaches your lock screen and you can answer it there.</p>
 
 <img src="docs/screenshots/hero.png" width="820" alt="T3 Bot on three iPhones: the home screen with the bots and what needs you, a conversation with a bot, and an approval card with its checks and buttons">
 
@@ -37,9 +37,18 @@ Choose the `T3Bot` scheme and an iPhone simulator, then Run. On the connect scre
 
 A small server that runs next to T3 Code on your Mac, an iPhone app you build yourself, and a `t3bot` command for scripts and agents. Your bots are ordinary T3 threads, so everything you do on the phone is also in T3 Code on the desktop.
 
-This is an independent project. It is not affiliated with, endorsed by or supported by T3 Code or Ping.
+How it compares, honestly:
 
-- **Your bots as contacts.** Pick a thread, give it a name, a role and a face. Open it like a chat: send text or photos, see what it is doing while it works, tap a suggested reply.
+- **Not a fork.** The app, the server and the command line were written for this project. The only outside code is the BoopFace faces (MIT).
+- **T3 Code's own mobile app** (App Store and Google Play) is a full client: projects, threads, diffs, a terminal, files, pull requests, voice input, and pushes through T3 Connect. T3 Bot does much less on purpose: it shows only the threads you turn into bots, plus anything waiting on you from any thread, in a native SwiftUI app for iPhone only. Its pushes come from a server and an Apple push key you run yourself, with no account.
+- **Grok Bot** runs its own model and drives T3 Code for you. T3 Bot has no model of its own: each bot is a T3 Code thread, and you talk to the agent T3 Code runs in it.
+- **It reaches into T3 Code's internals** (its database and local websocket), not a public API, so a T3 Code update can break it.
+
+T3 Bot is not affiliated with, endorsed by or supported by T3 Code, Ping or xAI.
+
+What it does:
+
+- **Your bots as contacts.** Make a bot from the phone: a name, a job and a face, and it gets its own new T3 thread. Open it like a chat: send text or photos, see what it is doing while it works, tap a suggested reply. Turning a thread you already have into a bot means adding it to the config file.
 - **One list of what needs you.** Questions and approvals from any T3 thread, cards from your own scripts and notes from your agents, ranked most urgent first.
 - **Answer from the lock screen.** An agent's question arrives as a notification you can answer in place. An approval has Approve and Decline buttons, and a bot's reply has a Reply field.
 - **Pushes that say which bot.** Notifications show the bot's name and face as the sender, like a message from a person.

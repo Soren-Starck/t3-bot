@@ -264,7 +264,7 @@ struct SettingsAboutSection: View {
             Text("About")
         } footer: {
             // A credit, not a setting: under the card like the other notes.
-            Text("Faces: BoopFace by CX ArtLab, MIT license.")
+            Text("An unofficial app, not affiliated with T3 Code or Ping. Faces: BoopFace by CX ArtLab, MIT license.")
         }
     }
 
