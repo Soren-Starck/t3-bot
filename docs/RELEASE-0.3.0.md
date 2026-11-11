@@ -92,7 +92,7 @@ The four at the top of these notes, and:
 
 - A Claude thread that was already running when notifications were turned on rings from its next session. A Claude provider with its own `--settings` launch argument, or with environment values, is left alone and does not ring.
 - A pairing with T3 Code lasts 30 days, then the app asks you to pair again.
-- Paired straight with T3 Code, quiet hours make pushes silent but do not hold them, and Settings still shows the morning brief and the calendar switch, which need the server.
+- Paired straight with T3 Code, quiet hours make pushes silent but do not hold them. The morning brief and sharing the calendar and contacts need the server, and Settings says so.
 - T3 Bot uses the API of T3 Code's own clients, not a documented public one. A T3 Code update can break it until T3 Bot follows. The app refuses a T3 Code whose protocol it does not know and says so.
 
 Bugs and ideas go in [issues](https://github.com/Soren-Starck/t3-bot/issues).
