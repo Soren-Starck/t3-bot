@@ -27,6 +27,19 @@ enum DirectPush {
 
     private static func save(_ s: Saved?) { store.set(s.flatMap { try? JSONEncoder().encode($0) }, key) }
 
+    /// The address the hooks were last written with, set only once that write went through.
+    private static var installed: String? {
+        get { UserDefaults.standard.string(forKey: "t3bot.direct.push.installed") }
+        set { UserDefaults.standard.set(newValue, forKey: "t3bot.direct.push.installed") }
+    }
+
+    /// True when the hooks do not ring this phone at `token`: iOS gave it a new push token (a restore, a reinstall),
+    /// or the last write of the hooks did not finish. They are then written again.
+    static func stale(token: String) -> Bool {
+        guard let s = saved, s.token == token, s.env == API.apnsEnv else { return true }
+        return installed != s.address
+    }
+
     enum Failure: LocalizedError {
         case noSender, refused(String), otherSettings([String]), noClaude, scope
 
@@ -80,6 +93,8 @@ enum DirectPush {
     static func apply(token: String?, remove: Bool = false) async throws -> Int {
         guard let b = DirectLink.current else { return 0 }
         guard let host, let ring = URL(string: "https://\(host)/api/ring") else { throw Failure.noSender }
+        // This phone's earlier addresses (its push token changed since): they ring nothing now and go out of the hooks.
+        let earlier = [installed, saved?.address].compactMap { $0 }
         let mine: String? = remove ? saved?.address : try await address(token: token ?? saved?.token ?? "")
         let home: Home = try await API.get("v1/home")
         let bots = home.agents.map(\.threadId)
@@ -95,6 +110,7 @@ enum DirectPush {
                 addresses.removeAll { $0 == mine }
                 if !remove { addresses.append(mine) }
             }
+            addresses.removeAll { $0 != mine && earlier.contains($0) }
             let next: String
             if addresses.isEmpty {
                 next = HookSettings.strip(args)
@@ -115,7 +131,7 @@ enum DirectPush {
             }
         }
         if ringing == 0, !blocked.isEmpty, !remove { throw Failure.otherSettings(blocked) }
-        if remove { save(nil) }
+        if remove { save(nil); installed = nil } else { installed = mine }
         return ringing
     }
 

@@ -48,7 +48,7 @@ T3 Code does not send pushes for other apps, and nothing of T3 Bot runs on the M
 1. The phone sends its push token to the push sender (`POST /api/address`) and gets back a sealed address that only that sender can open.
 2. The app writes Claude Code hooks into the launch arguments of each Claude provider in T3 Code's settings, as a `--settings` argument (`server.updateSettings`). A `PermissionRequest` hook covers every Claude thread that asks a question or needs an approval. A `Stop` hook covers the bot threads, for finished replies.
 3. When a hook fires, it runs `curl` against the sender's `POST /api/ring` with the sealed address, the thread's id and the kind of event.
-4. The sender (`push/`, two Vercel functions) opens the address and sends the push with your Apple key. It stores nothing.
+4. The sender (`push/`, three small Vercel functions) opens the address and sends the push with your Apple key. It stores nothing.
 5. On the phone, the notification service extension reads the question or the reply from T3 Code and shows it as a message from the bot.
 
 The sender never sees the content of a thread. It exists because Apple only accepts pushes for an app from a key of the team that signed it, and a hook on your Mac should not hold that key. Each person who builds the app deploys their own: [push/README.md](../push/README.md).

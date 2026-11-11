@@ -8,11 +8,11 @@
  * The write checks only run against a server that says `"demo": true` in /v1/hello. Such a server is reset
  * before the first check and after the last one, unless --read-only is given. Exit code 0 when everything passed, 1 otherwise.
  */
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { networkInterfaces, tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { asks, oneLine, preview, quickReplies, snippet } from './text'
-import { BadInput, bodyLimit, inQuiet, kindOf, minutesSince, overLimit, readBody, storedNote, tidyNote, wrongMethod } from './guard'
+import { BadInput, bodyLimit, inQuiet, kindOf, minutesSince, overLimit, readBody, safeLink, servableImage, storedNote, tidyNote, wrongMethod } from './guard'
 import { CURL_ARGS, curlConfig, post as apnsPost, token as apnsToken } from './push'
 
 const args = process.argv.slice(2)
@@ -857,6 +857,33 @@ function rules() {
   ok(readBody('').body && readBody('  \n').body && readBody('{"a":1}').body?.a === 1, 'an empty body is an empty object, an object is itself')
   for (const bad of ['null', '[]', '"x"', '3', 'true', '{', 'x']) ok(readBody(bad).error && !readBody(bad).body, `the body ${bad} is refused`)
   const thrown = (fn: () => unknown) => { try { fn(); return null } catch (e) { return e } }
+  // A card's link: what would act inside the app, or name a file or a script, is dropped; the rest is kept as sent.
+  for (const bad of ['t3bot://connect?url=http://x&token=y', 'T3Bot://connect', ' t3bot://connect', 't3\tbot://connect', 'javascript:alert(1)', 'JAVASCRIPT:x', 'java\nscript:x', 'data:text/html,x', 'file:///etc/passwd', 'https://x/\u0000']) {
+    ok(safeLink(bad) === '' && tidyNote({ title: 'x', link: bad }).link === undefined, `a card link ${JSON.stringify(bad)} is dropped`)
+    ok(storedNote({ id: 'n', kind: 'do', title: 'x', link: bad })!.link === undefined, `a stored card link ${JSON.stringify(bad)} is dropped`)
+  }
+  for (const good of ['https://example.com/a?b=c#d', 'http://127.0.0.1:3000', 'mailto:a@example.com', 't3://thread/1', 'example.com/page', 'x-t3bot-other://y']) {
+    ok(safeLink(good) === good && tidyNote({ title: 'x', link: good }).link === good, `a card link ${good} is kept`)
+  }
+  // /v1/file: the file asked for must itself be a picture under the home or temp folders.
+  {
+    const dir = mkdtempSync(join(tmpdir(), 't3bot-file-'))
+    try {
+      const real = (p: string) => realpathSync(p)
+      const home = real(dir)
+      writeFileSync(join(dir, 'a.png'), 'x'); writeFileSync(join(dir, 'secret.txt'), 'x')
+      symlinkSync(join(dir, 'secret.txt'), join(dir, 'link.png'))
+      symlinkSync(join(dir, 'a.png'), join(dir, 'good.jpg'))
+      symlinkSync('/etc/hosts', join(dir, 'hosts.png'))
+      ok(servableImage(join(dir, 'a.png'), home, real) === join(home, 'a.png'), 'a picture under the home folder is served')
+      ok(servableImage(join(dir, 'good.jpg'), home, real) === join(home, 'a.png'), 'a link to a picture is served as the picture')
+      ok(servableImage(join(dir, 'link.png'), home, real) === null, 'a link named .png that points at a text file is refused')
+      ok(servableImage(join(dir, 'hosts.png'), home, real) === null, 'a link named .png that points outside is refused')
+      ok(servableImage(join(dir, 'secret.txt'), home, real) === null && servableImage(join(dir, 'none.png'), home, real) === null, 'a file that is not a picture, or not there, is refused')
+      ok(servableImage(join(dir, '..', 'a.png'), home, real) === null && servableImage('a.png', home, real) === null, 'a path that leaves the folder or is not absolute is refused')
+      ok(servableImage(join(dir, 'a.png'), '/nowhere', (p) => p.replace(home, '/Users/x/.ssh')) === null, 'a picture in a folder of secrets is refused')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
   for (const bad of [null, 'x', [], {}, { title: '' }, { title: [] }, { title: 'x', kind: 'nope' }, { title: 'x', kind: 5 }, { title: 'x', kind: '' }]) {
     ok(thrown(() => tidyNote(bad)) instanceof BadInput, `tidyNote refuses ${JSON.stringify(bad)}`)
   }

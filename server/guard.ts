@@ -55,6 +55,31 @@ export function inQuiet(from: string, to: string, minuteOfDay: number): boolean 
   return a > b ? minuteOfDay >= a || minuteOfDay < b : minuteOfDay >= a && minuteOfDay < b
 }
 
+/**
+ * A card's link as the app may open it. The app hands it to the system as it is, so a link that would act inside
+ * T3 Bot itself (a pairing link, which shows the connect screen for another server) or that names a local file or
+ * a script is dropped: a card is written by an agent, and what an agent read can ask for anything.
+ */
+const NO_LINK = /^(t3bot|javascript|data|file|vbscript|blob)$/
+export function safeLink(x: string): string {
+  // The system ignores spaces and control characters inside a scheme, so they are taken out before it is read.
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(x.replace(/[\u0000-\u0020\u007f]/g, ''))?.[1].toLowerCase()
+  return /[\u0000-\u001f\u007f]/.test(x) || (scheme && NO_LINK.test(scheme)) ? '' : x
+}
+
+/** Only image files under the home folder or the temp folders, never secrets. Null for anything else. */
+export function servableImage(path: string, home: string, realpath: (p: string) => string): string | null {
+  const IMAGE = /\.(png|jpe?g|gif|webp|heic)$/i
+  if (!IMAGE.test(path) || !path.startsWith('/')) return null
+  let real: string
+  try { real = realpath(path) } catch { return null }
+  // The file itself must be a picture, not only the name asked for: a link named .png can point at anything.
+  if (!IMAGE.test(real)) return null
+  const okRoot = [home.replace(/\/+$/, '') + '/', '/private/tmp/', '/tmp/', '/private/var/folders/'].some((r) => real.startsWith(r))
+  const banned = ['/.ssh/', '/.config/', '/Library/Keychains/', '/.t3/userdata/secrets/', '/.gnupg/', '/.aws/'].some((b) => real.includes(b))
+  return okRoot && !banned ? real : null
+}
+
 export const NOTE_KINDS = ['alarm', 'approve', 'do', 'know', 'draft'] as const
 const DRAFT_KEYS = ['to', 'text', 'via', 'subject', 'event', 'start', 'end', 'location'] as const
 const CHECK_STATES = ['pass', 'fail', 'pending']
@@ -86,7 +111,7 @@ export function tidyNote(n: unknown): TidyNote {
   if (isObject(o.draft)) for (const k of DRAFT_KEYS) { const v = text(o.draft[k], 20000); if (v) draft[k] = v }
   return {
     kind: kind as TidyNote['kind'], title, agent: text(o.agent, 100), faceId: !!o.faceId,
-    body: text(o.body, 8000) || undefined, link: text(o.link, 2000) || undefined, key: text(o.key, 200) || undefined,
+    body: text(o.body, 8000) || undefined, link: safeLink(text(o.link, 2000)) || undefined, key: text(o.key, 200) || undefined,
     fields: list(o.fields, 40)?.map((f) => ({ label: text(f.label, 200), value: text(f.value, 2000) })),
     checks: list(o.checks, 40)?.map((c) => ({ label: text(c.label, 200), state: CHECK_STATES.includes(c.state) ? c.state : 'pending' })),
     edit: isObject(o.edit) && o.edit.text !== undefined && o.edit.text !== null
@@ -128,7 +153,7 @@ export function storedNote(row: unknown): StoredNote | null {
   const at = new Date(typeof r.created_at === 'string' && Number.isFinite(Date.parse(r.created_at)) ? Date.parse(r.created_at) : 0).toISOString()
   const base = {
     id, agent: text(r.agent, 100), kind: kind as StoredNote['kind'], title: text(r.title, 300) || '(no title)',
-    body: text(r.body, 8000) || undefined, link: text(r.link, 2000) || undefined, key: text(r.key, 200) || undefined, created_at: at,
+    body: text(r.body, 8000) || undefined, link: safeLink(text(r.link, 2000)) || undefined, key: text(r.key, 200) || undefined, created_at: at,
   }
   if (kind === 'draft') {
     const draft: Record<string, string> = {}

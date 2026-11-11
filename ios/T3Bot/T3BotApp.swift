@@ -138,8 +138,14 @@ final class Store: ObservableObject {
         UserDefaults.standard.set(drafts, forKey: "drafts")
     }
 
-    /// A message that could not be sent stays in its chat, marked, until a tap tries again.
-    @Published var failed: [String: FailedSend] = [:]
+    /// Messages that could not be sent stay in their chat, oldest first, each marked until a tap tries it again.
+    @Published var failed: [String: [FailedSend]] = [:]
+
+    /// Takes one message that did not leave out of its chat (sent again, back in the composer, or deleted).
+    func dropFailed(_ f: FailedSend, in agentId: String) {
+        failed[agentId]?.removeAll { $0.clientId == f.clientId }
+        if failed[agentId]?.isEmpty == true { failed[agentId] = nil }
+    }
 
     struct FailedSend: Equatable {
         let text: String
@@ -307,11 +313,15 @@ final class Store: ObservableObject {
     /// A T3 Code pairing: whether its Claude threads ring this phone (DirectPush), and what stops them.
     @Published var directPushOn = DirectPush.isOn
     @Published var directPushProblem: String?
+    /// Writes of the hooks under way: the automatic rewrite waits for them instead of starting a second one.
+    private var directPushJobs = 0
 
     /// Turns notifications on or off for a T3 Code pairing. On: this phone's address goes into T3 Code's Claude hooks.
     func setDirectPush(_ on: Bool, quiet: Bool = false) {
         guard Connection.current?.isDirect == true else { return }
+        directPushJobs += 1
         Task {
+            defer { directPushJobs -= 1 }
             if on {
                 guard let deviceToken else {
                     directPushProblem = "This phone has no push token yet. Allow notifications for T3 Bot in iOS Settings."
@@ -341,7 +351,8 @@ final class Store: ObservableObject {
         if let c = Connection.current, c.isDirect, let deviceToken {
             let asked = "t3bot.direct.push.asked.\(c.environmentId ?? c.url.absoluteString)"
             if DirectPush.isOn {
-                if DirectPush.saved?.token != deviceToken { setDirectPush(true, quiet: true) }
+                // A new push token, or hooks whose last write did not finish: written again; Settings says so if it fails.
+                if DirectPush.stale(token: deviceToken), directPushJobs == 0 { setDirectPush(true, quiet: true) }
             } else if !UserDefaults.standard.bool(forKey: asked) {
                 UserDefaults.standard.set(true, forKey: asked)
                 setDirectPush(true)
@@ -976,7 +987,7 @@ final class Store: ObservableObject {
         Haptics.tap()
         startLive(agentId)
         // An earlier message that did not leave stays until it is sent again or deleted, unless this is that one.
-        if let f = failed[agentId], clientId != nil, f.clientId == clientId { failed[agentId] = nil }
+        if let clientId, let f = failed[agentId]?.first(where: { $0.clientId == clientId }) { dropFailed(f, in: agentId) }
         // Where the chat stood: the message counts as arrived only once a new one of mine appears after this.
         outgoingAfter[agentId] = timelines[agentId]?.entries.last(where: { $0.type == "me" })?.id ?? ""
         let id = clientId ?? UUID().uuidString.lowercased()
@@ -989,7 +1000,7 @@ final class Store: ObservableObject {
             self.outgoing[agentId] = nil
             self.outgoingImages[agentId] = nil
             self.lastSent[agentId] = nil
-            self.failed[agentId] = FailedSend(text: text, images: images, clientId: id, imageIds: photoIds)
+            self.failed[agentId, default: []].append(FailedSend(text: text, images: images, clientId: id, imageIds: photoIds))
             onFail()
         }) {
             var body: [String: Any] = ["text": text, "clientId": id]

@@ -16,7 +16,7 @@ import { dirname, join } from 'path'
 import * as t3 from './t3'
 import { push, pushLive, type Alert, type Device, type Env } from './push'
 import { clip, oneLineCommand, plain, preview, quickReplies, snippet } from './text'
-import { BadInput, inQuiet, minutesSince, overLimit, readBody, storedNote, tidyNote, tooLarge, wrongMethod } from './guard'
+import { BadInput, inQuiet, minutesSince, overLimit, readBody, servableImage as servable, storedNote, tidyNote, tooLarge, wrongMethod } from './guard'
 import {
   DATA_DIR as DATA, HOME, PORT, ROOT, TOKEN_FILE, VERSION, apnsConfigured, botNotesPath, chiefId, configPath, expandArgv, isHHMM,
   keepDays, loadConfig, rulesPath, saveConfig, threadDefaults, tilde, userInPrompt, userName, type AgentConf, type Config, type SourceConf,
@@ -235,15 +235,8 @@ function splitImages(text: string, photosOnly = false): { text: string; images?:
   return images.length ? { text: t.replace(/\n{3,}/g, '\n\n').trim(), images } : { text }
 }
 
-/** Only image files under the home folder or the temp folders, never secrets. */
-function servableImage(path: string): string | null {
-  if (!/\.(png|jpe?g|gif|webp|heic)$/i.test(path) || !path.startsWith('/')) return null
-  let real: string
-  try { real = realpathSync(path) } catch { return null }
-  const okRoot = [HOME + '/', '/private/tmp/', '/tmp/', '/private/var/folders/'].some((r) => real.startsWith(r))
-  const banned = ['/.ssh/', '/.config/', '/Library/Keychains/', '/.t3/userdata/secrets/', '/.gnupg/', '/.aws/'].some((b) => real.includes(b))
-  return okRoot && !banned ? real : null
-}
+/** Only image files under the home folder or the temp folders, never secrets (guard.ts). */
+const servableImage = (path: string) => servable(path, HOME, realpathSync)
 
 /** /compact and other slash commands the compactor sends: plumbing, never shown. */
 const isSlash = (m: t3.Msg) => m.role === 'user' && /^\/[a-z-]+\s*$/.test(m.text.trim())

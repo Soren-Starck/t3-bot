@@ -67,10 +67,10 @@ fi
 } | rewrite_local_config T3BOT_URL T3BOT_TOKEN
 
 if [[ -n ${URL:-} ]]; then
-  echo "wrote Config/Local.xcconfig: the token, and the server address $URL"
+  echo "wrote ios/Config/Local.xcconfig: the token, and the server address $URL"
 elif [[ -n $URL_LINE ]]; then
-  echo "wrote Config/Local.xcconfig: the token, and the server address it already had"
+  echo "wrote ios/Config/Local.xcconfig: the token, and the server address it already had"
 else
-  echo "wrote Config/Local.xcconfig: the token, but no server address was found."
+  echo "wrote ios/Config/Local.xcconfig: the token, but no server address was found."
   echo "Run it again with T3BOT_URL=<address of your server>, or the app will open on its connect screen."
 fi

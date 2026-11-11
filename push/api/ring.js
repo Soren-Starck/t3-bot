@@ -3,7 +3,7 @@
 // the words from T3 Code itself. Nothing is stored. The caller chooses none of the words, the app or the phone:
 // the address fixes the phone and the app, and only this sender can make one.
 import crypto from 'node:crypto'
-import { unseal, expired, allowedTopics, apns, ringPayload, post, reply, tooMany } from '../lib/apns.js'
+import { unseal, expired, allowedTopics, apns, ringPayload, post, reply, tooMany, markGone, isGone } from '../lib/apns.js'
 
 const KINDS = ['request', 'reply', 'test']
 // The token is not this app's, or no longer any phone's: the caller should drop the address.
@@ -23,6 +23,9 @@ export default post('ring', 120, async (b, req, res) => {
   const phone = crypto.createHash('sha256').update(to.t).digest('hex').slice(0, 24)
   if (tooMany(`phone:${phone}`, 30)) { res.setHeader('retry-after', '60'); return reply(res, 429, { ok: false, code: 'too_many', error: 'too many pushes' }) }
 
+  // Apple refused this token a moment ago: the same answer, without asking Apple again.
+  if (isGone(phone)) return reply(res, 410, { ok: false, gone: true, code: 'gone', error: 'Unregistered' })
+
   const collapseId = crypto.createHash('sha256').update(`${thread}|${b.kind}`).digest('hex').slice(0, 32)
   const push = { token: to.t, topic: to.b, payload: ringPayload(b.kind, thread), collapseId }
   const started = Date.now()
@@ -37,6 +40,7 @@ export default post('ring', 120, async (b, req, res) => {
   if (r.status === 200) return reply(res, 200, { ok: true })
 
   console.warn(`push ring: ${b.kind} refused (${r.status} ${r.reason || 'no reason'})`)
+  if (r.status === 410 || GONE.includes(r.reason)) markGone(phone)
   if (r.status === 410 || GONE.includes(r.reason)) return reply(res, 410, { ok: false, gone: true, code: 'gone', error: r.reason || 'Unregistered' })
   if (r.status === 429) { res.setHeader('retry-after', '60'); return reply(res, 429, { ok: false, code: 'too_many', error: r.reason || 'too many pushes' }) }
   // Apple refuses the sender itself: its key, key id, team id, or the bundle id.

@@ -4,9 +4,8 @@ When T3 Bot is paired straight with T3 Code (no T3 Bot server), the phone rings 
 adds to T3 Code's Claude provider settings. A hook cannot hold an Apple push key, so it calls this sender, which holds
 the key and sends the push. It is three small routes for Vercel, with no database and no packages.
 
-Apple only accepts pushes for an app from the team that signs it. The sender the project ships with
-(`t3bot-push.vercel.app`) pushes to the project's own build and refuses every other app. **If you build T3 Bot with your
-own Apple team, deploy your own sender**: about ten minutes, below.
+Apple only accepts pushes for an app from the team that signs it, so there is no shared sender. A build signed by
+your team rings only through a sender that holds your team's push key. **Deploy your own**: about ten minutes, below.
 
 ## Your own sender
 
@@ -49,14 +48,15 @@ curl https://your-sender.vercel.app/api/health
 `{"ok":true}` means every setting is there and the key signs. Otherwise the answer names the setting to fix. A
 changed setting only counts after another `vercel deploy --prod`.
 
-**4. Point the app at it.** The app learns the sender when it is built, from the build setting `T3BOT_PUSH_HOST`. Add
-one line to `ios/Config/Local.xcconfig` (the file `setup.sh` wrote, not committed): a host name, with no `https://`.
+**4. Point the app at it.** The app learns the sender when it is built, from the build setting `T3BOT_PUSH_HOST` in
+`ios/Config/Local.xcconfig` (the file `setup.sh` wrote, not committed). `setup.sh` sets it for you and keeps your
+team and bundle identifier. Give it the host name, with no `https://` and no path. From the `push` folder:
 
 ```sh
-echo 'T3BOT_PUSH_HOST = your-sender.vercel.app' >> ../ios/Config/Local.xcconfig
+../ios/scripts/setup.sh --push-host your-sender.vercel.app
 ```
 
-Build and install the app again. On the phone, paired with T3 Code: Settings > Notifications > Ring this phone, then
+Build and install the app again (Run in Xcode, or `../ios/scripts/run-on-iphone.sh`). On the phone, paired with T3 Code: Settings > Notifications > Ring this phone, then
 Send a test push. Turning Ring this phone on is what writes the hooks, with your sender's address in them, into T3
 Code's Claude settings; nothing is edited by hand on the Mac. If the phone already rang through another sender, turn
 Ring this phone off and on once.

@@ -28,6 +28,8 @@ struct LiveFace: View {
     /// while it works) instead of a looping animation, whose in-between frames (one eye, a bar) looked broken.
     var calm = false
     @State private var ready = false
+    /// Reduce Motion: every face holds its expression (the calm mode of lists) and does not blink or loop.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -39,12 +41,15 @@ struct LiveFace: View {
                 .padding(size * 0.07)
                 .transition(.opacity)
             }
-            FaceWebView(face: face, size: size, state: state, blinks: blinks && !calm, calm: calm,
+            FaceWebView(face: face, size: size, state: state, blinks: blinks && !calm && !reduceMotion, calm: calm || reduceMotion,
                         onReady: { withAnimation(.easeOut(duration: 0.25)) { ready = true } },
                         // Its web process was killed (memory): the still covers it again until it has redrawn.
                         onLost: { ready = false })
                 .opacity(ready ? 1 : 0.011)
+                // The mode is part of the face's page: a new page when the setting changes, the still over it meanwhile.
+                .id(reduceMotion)
         }
+        .onChange(of: reduceMotion) { ready = false }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
     }

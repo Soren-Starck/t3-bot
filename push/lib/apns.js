@@ -205,6 +205,25 @@ export function tooMany(key, limit = 30, windowMs = 60_000, now = Date.now()) {
   return w.n > limit
 }
 
+// ---------- phones Apple called gone ----------
+// Apple watches how often a sender pushes to tokens that are not phones. Anyone can ask for an address of a made-up
+// token, so a token Apple refused is remembered for a few minutes (per warm instance) and not sent to Apple again.
+
+const gone = new Map()
+export const GONE_MS = 5 * 60_000
+export function markGone(key, now = Date.now()) {
+  if (gone.size >= 5000) for (const [k, until] of gone) if (until <= now) gone.delete(k)
+  if (gone.size >= 5000) gone.clear()
+  gone.set(key, now + GONE_MS)
+}
+export function isGone(key, now = Date.now()) {
+  const until = gone.get(key)
+  if (until === undefined) return false
+  if (until > now) return true
+  gone.delete(key)
+  return false
+}
+
 // ---------- requests ----------
 
 export const BODY_MAX = 2048

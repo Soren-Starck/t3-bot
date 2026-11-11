@@ -80,9 +80,9 @@ The app holds one pairing at a time. Pairing with another T3 Code, or with a T3 
 
 A fresh build has no push sender set, so notifications are off: the app shows everything when you open it and nothing rings. This step turns them on.
 
-Apple only lets the owner of an app's signing team send it pushes. Your build is signed by your team, so the pushes come from a small sender you deploy yourself with your own push key: two Vercel functions in `push/`.
+Apple only lets the owner of an app's signing team send it pushes. Your build is signed by your team, so the pushes come from a small sender you deploy yourself with your own push key: three small Vercel functions in `push/`.
 
-1. Deploy the sender. [push/README.md](../push/README.md) has the steps: an APNs key from developer.apple.com, a few environment variables, one deploy. Its list of allowed apps must hold your app's bundle identifier, the one `setup.sh` printed (`<prefix>.t3bot`).
+1. Deploy the sender. [push/README.md](../push/README.md) has the steps: an APNs key from developer.apple.com, a few environment variables, one deploy. Its list of allowed apps (the `ALLOWED_TOPICS` setting) must hold your app's bundle identifier, the one `setup.sh` printed (`<prefix>.t3bot`).
 2. Tell the build where it is, then build and install again:
 
    ```sh
@@ -112,7 +112,7 @@ Limits to know:
 
 Paired with T3 Code you get the bots and their chats, photos, questions and approvals with their buttons, new bots from the phone, search, the share extension, the widgets and T3 Code's scheduled tasks.
 
-These need the server: cards from your scripts and agents (`t3bot notify`, sources and handlers, see [CARDS.md](CARDS.md)), drafts, sharing the phone's calendar and contacts, pushes held during quiet hours, the evening summary and the morning brief. Settings still shows the morning brief and the calendar switch in this mode; they do nothing until you pair with a server.
+These need the server: cards from your scripts and agents (`t3bot notify`, sources and handlers, see [CARDS.md](CARDS.md)), drafts, sharing the phone's calendar and contacts, pushes held during quiet hours, the evening summary and the morning brief. In this mode Settings says the morning brief and sharing the calendar and contacts need a server.
 
 ## Optional: the T3 Bot server
 
@@ -414,7 +414,7 @@ cd t3-bot
 bin/t3bot demo
 ```
 
-Leave it running. In a second terminal, run `cd t3-bot/ios && xcodegen generate && open T3Bot.xcodeproj`, then run the `T3Bot` scheme on an iPhone simulator. On the connect screen, open "Just looking? Try the demo" and tap "Connect to the demo on this Mac". The demo saves nothing and sends no pushes.
+Leave it running. In a second terminal, in the same `t3-bot` folder, run `cd ios && xcodegen generate && open T3Bot.xcodeproj`, then run the `T3Bot` scheme on an iPhone simulator. On the connect screen, open "Just looking? Try the demo" and tap "Connect to the demo on this Mac". The demo saves nothing and sends no pushes.
 
 The demo listens on this computer only, which is all the simulator needs. Its token is the public word `demo`, so it stays closed to your network unless you ask: `bin/t3bot demo --lan` opens it to an iPhone on the same Wi-Fi and prints a code to scan. That needs the app already built on the phone ([step 1](#1-build-the-app-with-your-own-team)).
 

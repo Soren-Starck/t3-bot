@@ -326,7 +326,7 @@ struct AgentView: View {
                             .opacity(0.75)
                             .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .identity))
                     }
-                    if let f = store.failed[agentId] { failedBubble(f) }
+                    ForEach(store.failed[agentId] ?? [], id: \.clientId) { f in failedBubble(f) }
                     if faceInChat || (isGroup && workingNow) {
                         workingLine.id(Self.workingId).transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .leading)))
                     }
@@ -354,7 +354,7 @@ struct AgentView: View {
                         Text("\(tl.agent.name)'s thread no longer exists in T3 Code. Hide this bot, or make a new one.")
                             .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
                             .frame(maxWidth: .infinity).padding(.top, 40)
-                    } else if let tl, tl.entries.isEmpty, outgoing == nil, store.failed[agentId] == nil, !workingNow { welcome(tl.agent) }
+                    } else if let tl, tl.entries.isEmpty, outgoing == nil, (store.failed[agentId] ?? []).isEmpty, !workingNow { welcome(tl.agent) }
                     Color.clear.frame(height: 1).id("bottom")
                         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { bottomEdge = $0 }
                 }
@@ -746,7 +746,7 @@ struct AgentView: View {
             retry(f)
         } label: {
             VStack(alignment: .trailing, spacing: 4) {
-                EntryView(entry: Entry(id: "failed", type: "me", text: f.text, at: "", steps: [], working: nil, images: photos.isEmpty ? nil : photos), menu: false)
+                EntryView(entry: Entry(id: "failed:" + f.clientId, type: "me", text: f.text, at: "", steps: [], working: nil, images: photos.isEmpty ? nil : photos), menu: false)
                     .opacity(0.6)
                 Label("Not sent. Tap to try again", systemImage: "exclamationmark.circle.fill")
                     .font(.caption.weight(.medium)).foregroundStyle(.red)
@@ -761,14 +761,14 @@ struct AgentView: View {
                 Button { ChatCopy.text(f.text, store) } label: { Label("Copy", systemImage: "doc.on.doc") }
             }
             Button(role: .destructive) {
-                withAnimation { store.failed[agentId] = nil }
+                withAnimation { store.dropFailed(f, in: agentId) }
             } label: { Label("Delete", systemImage: "trash") }
         }
         .accessibilityHint("Sends the message again")
     }
 
     private func retry(_ f: Store.FailedSend) {
-        store.failed[agentId] = nil
+        store.dropFailed(f, in: agentId)
         sentAfter = tl?.entries.last(where: { $0.type == "me" })?.id ?? ""
         // The same id as the first try: if that one did reach the bot, it is not posted a second time.
         store.send(f.text, to: agentId, images: f.images, clientId: f.clientId)
@@ -776,7 +776,7 @@ struct AgentView: View {
 
     /// Back in the composer to be changed: the text (after anything already typed) and the photos.
     private func edit(_ f: Store.FailedSend) {
-        store.failed[agentId] = nil
+        store.dropFailed(f, in: agentId)
         let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         draft = typed.isEmpty ? f.text : f.text.isEmpty ? draft : draft + "\n" + f.text
         for d in f.images {
@@ -1493,11 +1493,32 @@ struct ImageViewer: View {
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
 
+    /// A zoom step asked through VoiceOver, within the pinch's own limits (1 to 6); back at 1 the image is centred again.
+    private func zoom(to wanted: CGFloat) {
+        let s = max(1, min(6, wanted))
+        withAnimation {
+            scale = s
+            last = s
+            if s == 1 { offset = .zero; lastOffset = .zero }
+        }
+    }
+
     var body: some View {
         NavigationStack {
             GeometryReader { _ in
                 Image(uiImage: image).resizable().scaledToFit()
                     .accessibilityLabel(title.isEmpty ? "Image" : title)
+                    .accessibilityValue(scale > 1 ? "Zoomed in" : "")
+                    // VoiceOver has no pinch here: its zoom gesture and two named actions do the same.
+                    .accessibilityZoomAction { action in
+                        switch action.direction {
+                        case .zoomIn: zoom(to: scale * 1.5)
+                        case .zoomOut: zoom(to: scale / 1.5)
+                        @unknown default: break
+                        }
+                    }
+                    .accessibilityAction(named: "Zoom in") { zoom(to: scale * 1.5) }
+                    .accessibilityAction(named: "Zoom out") { zoom(to: scale / 1.5) }
                     .scaleEffect(scale)
                     .offset(offset)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

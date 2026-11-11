@@ -86,7 +86,7 @@ It needs from the user:
 - an APNs key: on developer.apple.com, Certificates, Identifiers & Profiles, Keys, add a key with "Apple Push Notifications service (APNs)" enabled and download the `.p8` file (Apple allows one download). A push key they already have for the same team works too;
 - a Vercel account, with its CLI signed in on this Mac (`vercel whoami`).
 
-Then follow [push/README.md](../push/README.md) from the clone. Feed the key to `vercel env add` from its file, never through the chat, and make sure the sender's allowed apps hold the bundle identifier from step 2. When the sender is deployed, point the build at its host name and install again:
+Then follow [push/README.md](../push/README.md) from the clone. Feed the key to `vercel env add` from its file, never through the chat, and make sure the sender's allowed apps (its `ALLOWED_TOPICS` setting) hold the bundle identifier from step 2. When the sender is deployed, point the build at its host name and install again:
 
 ```sh
 ios/scripts/setup.sh --push-host <the sender's host name>

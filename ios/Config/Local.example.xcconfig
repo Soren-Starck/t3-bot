@@ -26,7 +26,7 @@ T3BOT_SIGN_STYLE = Automatic
 
 // The host name of your own push sender (no https://, no path). An app signed by your team can only be
 // rung with a push key from your team, so the sender is yours to deploy: push/README.md, about ten minutes
-// on Vercel. Empty: the app works, and nothing rings until you open it.
+// on Vercel. Empty: the app works and the phone stays silent.
 T3BOT_PUSH_HOST =
 
 // ---- Rarely needed ----

@@ -13,6 +13,7 @@ enum Markdown {
     /// "- item" becomes "• item", "## Title" a bold line, "> quote" loses its mark and code fences their marker lines.
     /// A "#" with no space after it is left alone, so thread names such as "#deploys" stay as written.
     static func render(_ s: String) -> AttributedString {
+        if let hit = renderCache.object(forKey: s as NSString) { return hit.value }
         var inFence = false
         let lines = s.components(separatedBy: "\n").compactMap { line -> String? in
             let t = line.trimmingCharacters(in: .whitespaces)
@@ -27,7 +28,9 @@ enum Markdown {
             if t.hasPrefix(">") { return String(t.dropFirst().drop(while: { $0 == " " })) }
             return line
         }
-        return inline(lines.joined(separator: "\n"))
+        let out = inline(lines.joined(separator: "\n"))
+        renderCache.setObject(InlineBox(out), forKey: s as NSString)
+        return out
     }
 
     /// Bold, italic, strikethrough, inline code and links in one run of text. Line breaks are kept as written,
@@ -347,6 +350,13 @@ enum Markdown {
     private static let inlineCache: NSCache<NSString, InlineBox> = {
         let c = NSCache<NSString, InlineBox>()
         c.countLimit = 600
+        return c
+    }()
+
+    /// What `render` gave for a text: the same text always gives the same string, so a redraw does not redo it.
+    private static let renderCache: NSCache<NSString, InlineBox> = {
+        let c = NSCache<NSString, InlineBox>()
+        c.countLimit = 300
         return c
     }()
 

@@ -550,6 +550,8 @@ struct ConnectFace: View {
     var size: CGFloat = 96
     var skin = "101"
     @State private var ready = false
+    /// Reduce Motion: the face holds its expression and does not blink or loop.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -559,7 +561,7 @@ struct ConnectFace: View {
                     .padding(size * 0.07)
                     .transition(.opacity)
             }
-            FaceWebView(face: Face(skin: skin), size: size, state: state) {
+            FaceWebView(face: Face(skin: skin), size: size, state: state, blinks: !reduceMotion, calm: reduceMotion) {
                 withAnimation(.easeOut(duration: 0.25)) { ready = true }
             }
             .opacity(ready ? 1 : 0.011)

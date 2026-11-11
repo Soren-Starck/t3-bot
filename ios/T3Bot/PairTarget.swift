@@ -32,7 +32,9 @@ enum PairTarget: Equatable {
         case let .server(c):
             return (c, try await API.hello(c))
         case let .t3code(p):
-            let r = try await T3Link.pair(p, label: "T3 Bot on \(UIDevice.current.name)", os: "iOS \(UIDevice.current.systemVersion)", session: API.session)
+            // UIDevice belongs to the main thread.
+            let (device, system) = await MainActor.run { (UIDevice.current.name, UIDevice.current.systemVersion) }
+            let r = try await T3Link.pair(p, label: "T3 Bot on \(device)", os: "iOS \(system)", session: API.session)
             let c = Connection(url: p.base, token: r.token, kind: .t3code, environmentId: r.descriptor.environmentId, name: r.descriptor.label)
             return (c, Hello(ok: true, name: r.descriptor.label ?? "T3 Code", version: r.descriptor.serverVersion, user: nil, demo: false, push: nil, bots: nil,
                              t3: T3State(ok: true, error: nil)))

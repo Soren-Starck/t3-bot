@@ -8,7 +8,17 @@ import SwiftUI
 /// The snapshot goes to their own T3 Bot server and nowhere else. Bots never send: they leave drafts, which
 /// open in the iPhone's own composer, where the person presses Send.
 enum PhoneSync {
+    /// `push` runs from several tasks: the time of the last one is read and set under a lock.
+    private static let pushLock = NSLock()
     private static var lastPush = Date.distantPast
+
+    /// True when a push is due (forced, or the last one is over 30 minutes old), and counts it as started.
+    private static func claimPush(force: Bool) -> Bool {
+        pushLock.lock(); defer { pushLock.unlock() }
+        guard force || Date().timeIntervalSince(lastPush) > 1800 else { return false }
+        lastPush = Date()
+        return true
+    }
     static let events = EKEventStore()
 
     static func enable() async -> Bool {
@@ -32,8 +42,7 @@ enum PhoneSync {
     static func push(force: Bool = false) async {
         // A T3 Code pairing has no server to keep the snapshot: nothing is read from the phone.
         guard Connection.current?.isDirect != true else { return }
-        guard force || Date().timeIntervalSince(lastPush) > 1800 else { return }
-        lastPush = Date()
+        guard claimPush(force: force) else { return }
         let iso = ISO8601DateFormatter()
         var calendar: [[String: Any]] = []
         if EKEventStore.authorizationStatus(for: .event) == .fullAccess {

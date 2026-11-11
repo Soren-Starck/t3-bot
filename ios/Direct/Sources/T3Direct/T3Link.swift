@@ -19,6 +19,8 @@ enum T3PairingError: LocalizedError, Equatable {
     case unreachable(String)
     case notT3Code
     case tooNew(Int)
+    /// The protocol version it speaks and its own version ("" when it gives none).
+    case tooOld(Int, String)
     case codeRefused
     case refused(Int, String)
 
@@ -29,6 +31,7 @@ enum T3PairingError: LocalizedError, Equatable {
         case .unreachable: return "Can't reach T3 Code"
         case .notT3Code: return "Not a T3 Code address"
         case .tooNew: return "This T3 Code is too new"
+        case .tooOld: return "This T3 Code is too old"
         case .codeRefused: return "That code did not work"
         case .refused: return "T3 Code said no"
         }
@@ -41,6 +44,8 @@ enum T3PairingError: LocalizedError, Equatable {
         case let .unreachable(why): return why
         case .notT3Code: return "Something answers at that address, but it is not T3 Code. Check the address."
         case let .tooNew(v): return "It speaks version \(v) of T3 Code's protocol, which this T3 Bot does not know yet. Update T3 Bot."
+        case let .tooOld(v, version):
+            return "It is T3 Code\(version.isEmpty ? "" : " \(version)") and speaks version \(v) of T3 Code's protocol. T3 Bot needs version \(T3Link.protocolVersion), which came with T3 Code \(T3Link.minimumT3Code). Update T3 Code on your Mac, then pair again."
         case .codeRefused: return "Codes work once and only for a few minutes. Create a new link in T3 Code and try again."
         case let .refused(code, body): return "It answered \(code)\(body.isEmpty ? "" : ": \(body.prefix(160))")."
         }
@@ -63,6 +68,29 @@ struct T3Descriptor: Codable, Equatable {
 enum T3Link {
     static let protocolVersion = 2
     static let protocolHeader = "x-t3-orchestration-protocol"
+    /// The first T3 Code that speaks protocol 2: nightly 0.0.46-nightly.20261003, first stable release 0.1.0.
+    static let minimumT3Code = "0.1.0"
+
+    /// Whether this T3 Bot can talk to what answered. T3 Code itself only accepts a client that speaks exactly
+    /// its protocol version (HTTP 426 otherwise), so an older or a newer one is refused here, in plain words,
+    /// before a code is spent. A descriptor with no version is a host from before the versions (protocol 1).
+    static func check(_ d: T3Descriptor) throws {
+        let v = d.orchestrationProtocolVersion ?? 1
+        if v > protocolVersion { throw T3PairingError.tooNew(v) }
+        if v < protocolVersion { throw T3PairingError.tooOld(v, d.serverVersion ?? "") }
+    }
+
+    /// T3 Code's refusal of a client whose protocol it does not speak (426 with
+    /// `{"code":"orchestration_protocol_incompatible","orchestrationProtocolVersion":N}`), in plain words; nil for any other body.
+    static func protocolRefusal(_ body: String) -> String? {
+        let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any]
+        guard json?["code"] as? String == "orchestration_protocol_incompatible" || body.contains("orchestration_protocol_incompatible") else { return nil }
+        guard let v = (json?["orchestrationProtocolVersion"] as? NSNumber)?.intValue else {
+            return "This T3 Code speaks another version of its protocol than this T3 Bot (version \(protocolVersion)). Update T3 Bot and T3 Code."
+        }
+        if v > protocolVersion { return "This T3 Code speaks version \(v) of its protocol, which this T3 Bot (version \(protocolVersion)) does not know yet. Update T3 Bot." }
+        return "This T3 Code speaks version \(v) of its protocol; T3 Bot needs version \(protocolVersion), which came with T3 Code \(minimumT3Code). Update T3 Code on your Mac."
+    }
 
     // MARK: Reading what a person gives
 
@@ -231,8 +259,20 @@ enum T3Link {
         r.setValue(String(protocolVersion), forHTTPHeaderField: protocolHeader)
         let (data, resp) = try await session.data(for: r)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else { throw T3Error.http(code, String(decoding: data.prefix(300), as: UTF8.self)) }
+        guard code == 200 else {
+            // T3 Code checks the protocol header against its own version and answers a bare 400 when they differ
+            // (404 when the path is from another version). Ask it who it is, to say that in plain words.
+            if code == 400 || code == 404 || code == 426, let why = await protocolProblem(base, session: session) { throw T3Error.rpc(why) }
+            throw T3Error.http(code, String(decoding: data.prefix(300), as: UTF8.self))
+        }
         return data
+    }
+
+    /// "This T3 Code is too old ..." or "... too new ..." when what answers at `base` speaks another protocol
+    /// than this T3 Bot (it was updated, or replaced, after pairing); nil when it speaks ours or does not answer.
+    static func protocolProblem(_ base: URL, session: URLSession) async -> String? {
+        guard let d = try? await descriptor(base, session: session) else { return nil }
+        do { try check(d); return nil } catch { return (error as? T3PairingError)?.errorDescription }
     }
 
     /// A network failure in plain words, with what to try.
@@ -261,7 +301,7 @@ enum T3Link {
         let host = input.base.host ?? input.base.absoluteString
         let d: T3Descriptor
         do { d = try await descriptor(input.base, session: session) } catch let e as T3PairingError { throw e } catch { throw T3PairingError.unreachable(why(error, host: host)) }
-        if let v = d.orchestrationProtocolVersion, v > protocolVersion { throw T3PairingError.tooNew(v) }
+        try check(d)
         do {
             let t = try await exchange(input, label: label, os: os, session: session)
             return (t.token, d)
@@ -280,6 +320,7 @@ enum T3Error: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .http(401, _), .http(403, _): return "T3 Code refused this phone's token. Pair again in Settings."
+        case let .http(426, body): return T3Link.protocolRefusal(body) ?? "T3 Code answered 426: \(body.prefix(160))"
         case let .http(code, body): return "T3 Code answered \(code): \(body.prefix(160))"
         case let .decode(what): return "T3 Code sent \(what) in a form this T3 Bot does not read. Update T3 Bot."
         case let .rpc(why): return why

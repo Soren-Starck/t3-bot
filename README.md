@@ -48,7 +48,7 @@ what to do when a step needs me (my Apple account, Xcode, my iPhone).
 Never print a pairing code, a token or a key.
 ```
 
-[docs/SETUP.md](docs/SETUP.md) has every step. To look first, [the demo](docs/SETUP.md#the-demo) runs the app in the simulator with no T3 Code and no Apple account.
+[docs/SETUP.md](docs/SETUP.md) has every step. To look first, [the demo](docs/SETUP.md#the-demo) runs the app in the simulator with no T3 Code and no Apple account (it needs [Bun](https://bun.sh)).
 
 ## Notifications
 

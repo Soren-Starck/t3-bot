@@ -84,16 +84,16 @@ generate() {
     echo "generated ios/T3Bot.xcodeproj"
   else
     print -r -u2 -- "$out"
-    die "xcodegen could not generate the project (above). Your values are saved in Config/Local.xcconfig."
+    die "xcodegen could not generate the project (above). Your values are saved in ios/Config/Local.xcconfig."
   fi
 }
 
 if (( RESET )); then
   if [[ -r $LOCAL_CONFIG ]]; then
     rewrite_local_config $NAMES $SIGN_NAMES T3BOT_SIGN_IDENTITY </dev/null
-    echo "removed the team, bundle identifier and signing values from Config/Local.xcconfig"
+    echo "removed the team, bundle identifier and signing values from ios/Config/Local.xcconfig"
   else
-    echo "Config/Local.xcconfig does not exist, so the defaults already apply"
+    echo "ios/Config/Local.xcconfig does not exist, so the defaults already apply"
   fi
   generate
   exit 0
@@ -125,6 +125,8 @@ if [[ -z $BUNDLE && -z $PREFIX && -t 0 ]]; then
   read "PREFIX?Bundle identifier prefix: " || true
 fi
 TEAM=${TEAM//[[:space:]]/}
+# A team ID typed in small letters is the same team.
+TEAM=${(U)TEAM}
 BUNDLE=${BUNDLE//[[:space:]]/}
 PREFIX=${PREFIX//[[:space:]]/}
 PREFIX=${PREFIX%.}
@@ -149,8 +151,8 @@ if [[ $PUSH == set ]]; then
   PUSH_HOST=${PUSH_HOST%%/*}
   [[ $PUSH_HOST =~ '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$' ]] || die "--push-host takes a host name, like my-sender.vercel.app. Got: $PUSH_HOST"
 fi
-# The sender in the defaults only rings the app signed by its own team, so a first setup under another
-# team starts with none instead of sending this phone's push address somewhere that refuses it.
+# A sender only rings the app signed by its own team, so a first setup starts with none and writes the
+# empty line, which also shows where the value goes.
 [[ $PUSH == keep && $FIRST == 1 ]] && PUSH=off
 [[ $PUSH == keep ]] || NAMES+=(T3BOT_PUSH_HOST)
 
@@ -180,7 +182,7 @@ fi
 # What the file says now, so a kept manual signing is reported as what it is.
 MANUAL=0
 [[ $(local_value T3BOT_SIGN_STYLE) == Manual ]] && MANUAL=1
-echo "wrote Config/Local.xcconfig: team $TEAM, bundle identifier $BUNDLE, $( (( MANUAL )) && echo "manual signing with your four profiles" || echo "automatic signing")"
+echo "wrote ios/Config/Local.xcconfig: team $TEAM, bundle identifier $BUNDLE, $( (( MANUAL )) && echo "manual signing with your four profiles" || echo "automatic signing")"
 generate
 
 echo
@@ -199,8 +201,9 @@ echo "Then pair: in T3 Code, open Settings > Sharing & access, create a link, an
 echo "app's first screen. Nothing else has to be installed on the Mac."
 case $PUSH in
   off) echo
-       echo "Notifications: this build has no push sender, so nothing rings until you open the app. To make the"
-       echo "phone ring, deploy your own sender (push/README.md), then: ios/scripts/setup.sh --push-host <its host name>" ;;
+       echo "Notifications: this build has no push sender, so the phone stays silent and the app shows what is new"
+       echo "when you open it. To make the phone ring, deploy your own sender (push/README.md), then run:"
+       echo "  ios/scripts/setup.sh --push-host <its host name>" ;;
   set) echo
        echo "Notifications ring through $PUSH_HOST. Its ALLOWED_TOPICS must hold $BUNDLE." ;;
 esac

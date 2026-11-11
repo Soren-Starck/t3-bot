@@ -163,6 +163,29 @@ test('ring: BadDeviceToken tries the other Apple environment once before calling
   expect(sent.map((p) => p.env)).toEqual(['production', 'sandbox'])
 })
 
+test('ring: a token Apple refused is not sent to Apple again for a few minutes', async () => {
+  const dead = hex()
+  answer = () => ({ status: 400, reason: 'BadDeviceToken' })
+  expect((await call(ring, { to: addressFor(dead), kind: 'request' })).status).toBe(410)
+  const asked = sent.length
+  expect(asked).toBe(2)
+  // The same made-up token again, under a new address and from another caller: Apple is not asked.
+  for (let i = 0; i < 5; i++) {
+    const r = await call(ring, { to: addressFor(dead), kind: 'reply' })
+    expect(r.status).toBe(410)
+    expect(r.body.gone).toBe(true)
+  }
+  expect(sent.length).toBe(asked)
+  // Another phone is not held back, and a refusal of the sender itself marks no phone.
+  answer = () => ({ status: 200, reason: '' })
+  expect((await call(ring, { to: addressFor(), kind: 'request' })).status).toBe(200)
+  const fine = hex()
+  answer = () => ({ status: 403, reason: 'InvalidProviderToken' })
+  expect((await call(ring, { to: addressFor(fine), kind: 'request' })).status).toBe(502)
+  answer = () => ({ status: 200, reason: '' })
+  expect((await call(ring, { to: addressFor(fine), kind: 'request' })).status).toBe(200)
+})
+
 test('ring: Apple refusing the sender, or not answering, is a 502 that says which', async () => {
   answer = () => ({ status: 403, reason: 'InvalidProviderToken' })
   const auth = await call(ring, { to: addressFor(), thread: 't', kind: 'test' })
