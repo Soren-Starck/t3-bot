@@ -7,3 +7,14 @@ __pycache__/
 .DS_Store
 # A bot's own face picture, drawn by the server when the bot is made in the app. The stock ones in avatars/skins are tracked.
 /avatars/*.png
+# Never committed, wherever they sit: keys, certificates, signing profiles, env files, build caches.
+*.p8
+*.p12
+*.mobileprovision
+.env
+.env.*
+.build/
+.swiftpm/
+.vercel/
+DerivedData/
+xcuserdata/

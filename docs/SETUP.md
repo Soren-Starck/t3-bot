@@ -1,26 +1,128 @@
 # Setup
 
-This takes you from a fresh clone to an iPhone that rings when an agent needs you. Plan for about 30 minutes, most of it in Xcode and on developer.apple.com.
+This takes you from a fresh clone to T3 Bot on your iPhone, paired with T3 Code. Plan for about 20 minutes, most of it in Xcode. Notifications take another 15, on developer.apple.com and Vercel.
 
-To have your coding agent do it, paste the prompt from the [README](../README.md#set-it-up); it follows [AGENT-SETUP.md](AGENT-SETUP.md).
+Nothing is installed on the Mac that runs T3 Code. The [T3 Bot server](#optional-the-t3-bot-server) of earlier versions still exists and is optional.
 
-If you only want to look at the app, [the demo](#the-demo) needs none of this.
+To have your coding agent do it, paste the prompt from the [README](../README.md#build-scan-done); it follows [AGENT-SETUP.md](AGENT-SETUP.md). If you only want to look at the app, [the demo](#the-demo) needs none of this.
 
 ## What you need
 
 | | Why |
 |---|---|
-| A Mac that stays on, with T3 Code running | The server runs beside T3 Code and reads its local data |
-| [Bun](https://bun.sh) | Runs the server and the `t3bot` command |
-| Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) | Builds the app. `brew install xcodegen` |
+| T3 Code running on your computer, with at least one project | The app pairs with it |
+| A Mac with Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) | Builds the app. `brew install xcodegen` |
 | An iPhone on iOS 26 | The app is iPhone only |
-| A paid Apple Developer account | Signing the app's notification entitlements, and the push key |
-| Tailscale on the Mac and the phone (recommended) | An HTTPS address for the server that works away from home |
-| Google Chrome or Chromium on the server Mac (optional) | Used headless to draw a new bot's still face in its own colours for notifications. Without it the stock picture of the face is used |
+| A paid Apple Developer account | Signing the app's notification entitlements. There is no TestFlight or App Store build |
+| A [Vercel](https://vercel.com) account and its CLI (for notifications) | Hosts your push sender. The free plan is enough |
 
-The Mac that runs T3 Code and the Mac that runs Xcode can be two machines.
+The computer that runs T3 Code and the Mac that runs Xcode can be two machines.
 
-## 1. Install the server
+## 1. Build the app with your own team
+
+On the Mac with Xcode:
+
+```sh
+brew install xcodegen
+git clone https://github.com/Soren-Starck/t3-bot
+cd t3-bot
+ios/scripts/setup.sh
+```
+
+`setup.sh` asks for two values, writes them to `ios/Config/Local.xcconfig` (not committed) and generates the Xcode project:
+
+- your team ID, the ten letters and digits under Membership details on developer.apple.com;
+- a bundle identifier prefix of your own, like the reverse of a domain you own. The app becomes `<prefix>.t3bot`.
+
+To skip the questions: `ios/scripts/setup.sh --team <your team id> --bundle-prefix <your prefix>`, or `--bundle-id <id>` for a whole identifier. `ios/scripts/setup.sh --help` lists every option and `ios/Config/Local.example.xcconfig` explains every value. Do not edit `ios/Config/T3Bot.xcconfig` or `ios/project.yml` for this: they hold the defaults, and your file wins over them.
+
+The project has four targets: the app (`T3Bot`), a notification service extension (`T3BotNotify`), widgets (`T3BotWidgets`) and a share extension (`T3BotShare`). Their bundle identifiers are yours with `.notify`, `.widgets` and `.share` added.
+
+Sign in to your Apple account under Xcode > Settings > Accounts. Then put the app on the iPhone, one of two ways:
+
+- **Xcode.** `open ios/T3Bot.xcodeproj`, choose the `T3Bot` scheme, plug in your iPhone, choose it as the destination and press Run. Xcode registers the four identifiers and makes the profiles the first time.
+- **Terminal.** `ios/scripts/run-on-iphone.sh`, with the iPhone plugged in, unlocked and trusted. It builds, installs and opens the app. With several iPhones connected, pass the identifier of one from `xcrun devicectl list devices`.
+
+The iPhone needs Developer Mode on (Settings > Privacy & Security > Developer Mode).
+
+The app needs these capabilities on its App ID: Push Notifications, Time Sensitive Notifications, Communication Notifications, and Keychain Sharing (the extensions read the pairing from a shared Keychain group). Automatic signing adds them when it can. A signing error here almost always means one is missing, most often Communication Notifications. Open the identifier on developer.apple.com (Certificates, Identifiers & Profiles) and tick it there.
+
+If you make the four provisioning profiles yourself, pass their names: `ios/scripts/setup.sh --team <id> --bundle-id <id> --manual <app> <notify> <widgets> <share>`. `--reset` removes your values again.
+
+To update the app later, `git pull` in the clone and build again.
+
+## 2. Pair with T3 Code
+
+1. On the computer, in T3 Code, open Settings > Sharing & access and choose Create link. T3 Code shows a QR code and a link.
+2. In T3 Bot, tap "Scan the code from T3 Code" and point the phone at the QR code.
+
+When T3 Code runs headless, `t3 pair` on that machine prints a pairing QR code in the terminal.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="screenshots/connect-dark.png">
+  <img src="screenshots/connect.png" width="260" alt="The connect screen">
+</picture>
+
+The app trades the code for a token, keeps the token in the iPhone's Keychain and shows your bots. A code works once and only for a few minutes, so create a new link if it has expired. T3 Code lists the phone under Sharing & access as "T3 Bot on <the iPhone's name>", and you can remove it there at any time. The token lasts 30 days; after that the app asks you to pair again.
+
+"Other ways to connect" on the same screen has two more:
+
+- **Paste link** takes the link itself, when the QR code is not in front of you.
+- **Enter code** takes an address and the code. Use it away from home with your T3 Connect address (it looks like `https://<name>.t3coderelay.com`), or with a Tailscale address. The address T3 Code gives under "Copy MCP URL" works as it is.
+
+The phone must be able to reach the address in the link. A link made on your home network works on that network. For anywhere else, pair with the T3 Connect or Tailscale address.
+
+A bot is a T3 Code thread titled `%BOT <Name>`, in any project. A group chat is titled `%BOT Group: <Name>`. If you have none yet, make the first one in the app. Its face and its job are kept on the phone.
+
+The app holds one pairing at a time. Pairing with another T3 Code, or with a T3 Bot server, replaces it and forgets the chats and drafts saved from the old one.
+
+## 3. Notifications
+
+A fresh build has no push sender set, so notifications are off: the app shows everything when you open it and nothing rings. This step turns them on.
+
+Apple only lets the owner of an app's signing team send it pushes. Your build is signed by your team, so the pushes come from a small sender you deploy yourself with your own push key: two Vercel functions in `push/`.
+
+1. Deploy the sender. [push/README.md](../push/README.md) has the steps: an APNs key from developer.apple.com, a few environment variables, one deploy. Its list of allowed apps must hold your app's bundle identifier, the one `setup.sh` printed (`<prefix>.t3bot`).
+2. Tell the build where it is, then build and install again:
+
+   ```sh
+   ios/scripts/setup.sh --push-host <your sender's host name>
+   ```
+
+   It keeps the team and identifier it saved before. The host name has no `https://` and no path.
+
+3. Open the app and allow notifications. Under Settings > Notifications, "Ring this phone" is on and "Send a test push" rings the phone through your sender.
+
+What "Ring this phone" does: it adds Claude Code hooks to the launch arguments of each Claude provider in T3 Code's settings (a `--settings` argument marked `T3BOT_HOOKS`). When a hook fires, it calls your sender with a sealed address for this phone, the thread's id and the kind of event. The sender pushes, and the phone reads the words from T3 Code. Turning "Ring this phone" off takes this phone out of the hooks. Each paired phone adds itself and removes only itself.
+
+| Event | Rings |
+|---|---|
+| A Claude thread asks a question or needs an approval, in any project | Yes, with the question's own choices as buttons |
+| A bot finishes a reply | Yes |
+| A Codex thread, or any provider that is not Claude | Not yet |
+| A thread that is not a bot finishes | No |
+
+Limits to know:
+
+- Claude Code reads its hooks when a session starts. A thread that was already running rings from its next session.
+- A Claude provider that already has its own `--settings` in its launch arguments, or that sets environment values, is left alone and does not ring.
+- During the quiet hours you set in the app, pushes arrive without sound and do not light the screen. Holding them until morning needs the server.
+
+## What works without the server
+
+Paired with T3 Code you get the bots and their chats, photos, questions and approvals with their buttons, new bots from the phone, search, the share extension, the widgets and T3 Code's scheduled tasks.
+
+These need the server: cards from your scripts and agents (`t3bot notify`, sources and handlers, see [CARDS.md](CARDS.md)), drafts, sharing the phone's calendar and contacts, pushes held during quiet hours, the evening summary and the morning brief. Settings still shows the morning brief and the calendar switch in this mode; they do nothing until you pair with a server.
+
+## Optional: the T3 Bot server
+
+The server is a Bun program that runs beside T3 Code on a Mac that stays on. The phone pairs with it instead of with T3 Code. It adds what the list above names, sends pushes itself with your own push key (no push sender), and rings for every provider, Codex included.
+
+Everything from here to [Troubleshooting](#troubleshooting) is about the server. Skip it if you paired with T3 Code. The app is the same build as in [step 1](#1-build-the-app-with-your-own-team); only the pairing differs.
+
+It needs [Bun](https://bun.sh), which runs the server and the `t3bot` command. Tailscale on the Mac and the phone is recommended: it gives the server an HTTPS address that works away from home. Google Chrome or Chromium on the server Mac is optional: it is used headless to draw a new bot's still face in its own colours for notifications, and without it the stock picture of the face is used.
+
+### Install the server
 
 On the Mac that runs T3 Code, with T3 Code open and at least one project in it:
 
@@ -37,7 +139,7 @@ The installer:
 - installs a LaunchAgent (`com.t3bot.server`) so the server starts at login and restarts if it stops, with its log in `~/Library/Logs/t3bot.log`;
 - links the `t3bot` command into `~/.local/bin` (put that folder on your `PATH`);
 - waits until `http://127.0.0.1:8809/health` answers;
-- runs `t3bot setup` if there is no bot yet, then `t3bot pair`, which prints the QR code for step 5.
+- runs `t3bot setup` if there is no bot yet, then `t3bot pair`, which prints the QR code for [pairing](#pair-the-phone-with-the-server).
 
 Run it again at any time: it restarts the server and keeps the token, the config and the data.
 
@@ -52,7 +154,7 @@ Run it again at any time: it restarts the server and keeps the token, the config
 
 Every route except `/health` and the bots' face pictures needs the token.
 
-## 2. First run
+### First run
 
 The installer has already done this. To do it by hand, or again:
 
@@ -77,7 +179,7 @@ t3bot doctor
 
 `doctor` reports on Bun, T3 Code, the config, each bot's thread, the rules files, the token, the server, the address your phone can use and the push key. Fix what it flags before going on.
 
-### The config file
+#### The config file
 
 The server looks for its config in this order:
 
@@ -130,7 +232,7 @@ The file is read again whenever it changes, so there is no restart after an edit
 
 `defaults.runtimeMode` set to `full-access` means a new bot's thread runs commands without asking. Lower it if you want approvals.
 
-## 3. Make the server reachable from your phone
+### Make the server reachable from your phone
 
 The installer has set this up one of two ways. `t3bot doctor` prints the address it found.
 
@@ -140,28 +242,7 @@ The installer has set this up one of two ways. `t3bot doctor` prints the address
 
 Any other private HTTPS front that forwards to `127.0.0.1:8809` works too. Tell `t3bot pair` about it with `--url <address>`, or set `T3BOT_PUBLIC_URL`. The app accepts plain http only for an address on the local network, so a public host name needs HTTPS. Do not publish the port on the open internet: the token is the only thing in front of your agents.
 
-## 4. Build the app with your own team
-
-On the Mac with Xcode, in the clone:
-
-```sh
-ios/scripts/setup.sh --team <your team id> --bundle-id <an identifier of your own, like com.example.t3bot>
-open ios/T3Bot.xcodeproj
-```
-
-`setup.sh` writes your team and bundle identifier to `ios/Config/Local.xcconfig`, which is not committed, switches signing to automatic and generates the Xcode project. Run with no option in a terminal, it asks for both values. The team ID is the ten letters and digits under Membership on developer.apple.com. Do not edit `ios/Config/T3Bot.xcconfig` or `ios/project.yml` for this: they hold the maintainer's defaults, and your file wins over them.
-
-The project has four targets: the app (`T3Bot`), a notification service extension (`T3BotNotify`), widgets (`T3BotWidgets`) and a share extension (`T3BotShare`). Their bundle identifiers are yours with `.notify`, `.widgets` and `.share` added.
-
-1. In Xcode, choose the `T3Bot` scheme, plug in your iPhone and choose it as the destination.
-2. Run. Xcode registers the four identifiers and makes the profiles the first time.
-3. The app needs these capabilities, which automatic signing adds to your App ID: Push Notifications, Time Sensitive Notifications, Communication Notifications, and Keychain Sharing (the extensions read the server address from a shared Keychain group).
-
-Signing errors here almost always mean a capability is missing on the App ID. Open the identifier on developer.apple.com (Certificates, Identifiers & Profiles) and tick it there.
-
-If you make the four provisioning profiles yourself, pass their names: `ios/scripts/setup.sh --team <id> --bundle-id <id> --manual <app> <notify> <widgets> <share>`. `--reset` removes your values again.
-
-## 5. Pair
+### Pair the phone with the server
 
 On the server Mac:
 
@@ -169,12 +250,7 @@ On the server Mac:
 t3bot pair
 ```
 
-It prints a QR code and a link of the form `t3bot://connect?url=<server address>&token=<token>`. In the app's connect screen, scan the QR code. You can also scan it with the iPhone camera, open the link on the phone, or paste it into the connect screen.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="screenshots/connect-dark.png">
-  <img src="screenshots/connect.png" width="260" alt="The connect screen">
-</picture>
+It prints a QR code and a link of the form `t3bot://connect?url=<server address>&token=<token>`. In the app's connect screen, scan the QR code with the same button that scans a T3 Code link. You can also scan it with the iPhone camera, open the link on the phone, or paste it into the connect screen.
 
 | Option | Meaning |
 |---|---|
@@ -189,9 +265,9 @@ The app checks the address and token, then shows your bots. Settings shows the s
 
 To use the `t3bot` command on another computer of yours, run `t3bot connect '<the link>'` there. It saves the address and the token for that computer.
 
-## 6. Pushes
+### Pushes from the server
 
-Without a push key, the app shows everything when you open it and nothing rings. To get notifications:
+The server sends pushes itself, with a push key of your team. It does not use the push sender. Without a key, the app shows everything when you open it and nothing rings.
 
 1. On developer.apple.com, go to Certificates, Identifiers & Profiles, then Keys. Create a key with "Apple Push Notifications service (APNs)" enabled.
 2. Download the `.p8` file. Apple lets you download it once. Note the Key ID shown beside it and your Team ID (Membership details).
@@ -246,7 +322,7 @@ Held pushes become one "While you slept" notification when quiet hours end. Quie
 
 Quick replies are the short answers you save in the app's settings. The server offers them under a bot's last message only when that message asks you something (it ends with a question, or asks you to choose or to give a go-ahead) and the bot suggested no replies of its own. A bot's own suggestions always come instead of yours.
 
-## Environment variables
+### Environment variables
 
 None is needed for a normal install. The first seven are written into the LaunchAgent when they are set as `deploy/install.sh` runs (`T3BOT_PORT=8811 deploy/install.sh`), so the server keeps them across restarts.
 
@@ -269,8 +345,9 @@ None is needed for a normal install. The first seven are written into the Launch
 | `T3BOT_READONLY=1` | Send nothing to T3 Code. The app can read, and every message or answer is refused |
 | `T3BOT_LOG_FILE` | The server's log file, which it trims once it passes 5 MB. The installer sets it to `~/Library/Logs/t3bot.log` |
 | `T3BOT_DEMO_PORT` | The demo server's port when `--port` is not given. Default 8810 |
+| `T3BOT_DEMO_HOST` | The address the demo server listens on. Default `127.0.0.1`, this computer only |
 
-## Updating
+### Updating
 
 ```sh
 cd t3-bot
@@ -280,9 +357,39 @@ deploy/install.sh --no-pair
 
 Then rebuild the app from Xcode if `ios/` changed.
 
+### What the server keeps
+
+The server keeps its own state in `~/.local/share/t3bot/`: a small SQLite file (snoozes, notes, registered phones, settings, the record of card taps) and, in `uploads/`, the photos you sent from the phone. It never writes to T3 Code's database, and your conversations stay in T3 Code whatever is set here.
+
+`keepDays` in the config says how long that history is kept. Once an hour the server deletes what is older than that many days:
+
+- photos sent from the phone (an old chat then shows a missing picture where one was)
+- notes you have read or handled, and the notes of the evening summary
+- the record of which card button was tapped
+
+A note you have not read is never deleted. `t3bot setup` writes `"keepDays": 180` into a new config. A config without the key, or with 0, keeps everything forever. `T3BOT_KEEP_DAYS` in the server's environment wins over the config.
+
 ## Troubleshooting
 
-Start with `t3bot doctor`. The server's log is `~/Library/Logs/t3bot.log`.
+Paired with T3 Code:
+
+| Symptom | Likely cause |
+|---|---|
+| The code is refused when you scan or type it | A code works once and for a few minutes. Create a new link in T3 Code |
+| "This T3 Code is too new" | T3 Code changed its protocol. Pull the latest T3 Bot and build again |
+| "refused this phone's token. Pair again to carry on." | The 30 days are over, or the phone was removed under Sharing & access. Pair again |
+| The app cannot reach T3 Code away from home | The pairing uses a home network address. Pair again with your T3 Connect or Tailscale address |
+| "This build of T3 Bot has no push sender set." | A fresh build has no push sender. Deploy yours ([push/README.md](../push/README.md)), run `ios/scripts/setup.sh --push-host <its host name>` and build again |
+| "The push sender said no: this sender does not push to that app" | The sender's `ALLOWED_TOPICS` does not hold your bundle identifier, or the build points at someone else's sender |
+| "already has its own --settings in T3 Code's launch arguments" | That Claude provider has its own `--settings` argument, so the hooks cannot be added to it |
+| "T3 Code runs no Claude provider here." | Notifications come from Claude threads only |
+| "This pairing may not change T3 Code's provider settings." | The link was made with less access. Create a link with the standard access and pair again |
+| A Claude thread asked and nothing rang | The thread started before the hooks were added (it rings from its next session), or notifications are denied in iOS Settings |
+| A Codex thread asked and nothing rang | Expected. Only Claude threads ring in this mode |
+| Pushes arrive without the bot's face | The Communication Notifications capability is missing on the App ID |
+| Widgets are empty | Open the app once after pairing so the extensions can read the connection |
+
+Paired with a server, start with `t3bot doctor`. The server's log is `~/Library/Logs/t3bot.log`.
 
 | Symptom | Likely cause |
 |---|---|
@@ -296,23 +403,10 @@ Start with `t3bot doctor`. The server's log is `~/Library/Logs/t3bot.log`.
 | Bots are listed but messages do not send | T3 Code is not running, or it was updated and changed something T3 Bot relies on. Check the server log and the project's issues |
 | No pushes | No `apns.json`, a wrong `topic` (it must be the app's bundle identifier), notifications denied in iOS Settings, or quiet hours |
 | Pushes arrive without the bot's face | The Communication Notifications capability is missing on the App ID |
-| Widgets are empty | Open the app once after pairing so the extensions can read the connection |
-
-## What the server keeps
-
-The server keeps its own state in `~/.local/share/t3bot/`: a small SQLite file (snoozes, notes, registered phones, settings, the record of card taps) and, in `uploads/`, the photos you sent from the phone. It never writes to T3 Code's database, and your conversations stay in T3 Code whatever is set here.
-
-`keepDays` in the config says how long that history is kept. Once an hour the server deletes what is older than that many days:
-
-- photos sent from the phone (an old chat then shows a missing picture where one was)
-- notes you have read or handled, and the notes of the evening summary
-- the record of which card button was tapped
-
-A note you have not read is never deleted. `t3bot setup` writes `"keepDays": 180` into a new config. A config without the key, or with 0, keeps everything forever. `T3BOT_KEEP_DAYS` in the server's environment wins over the config.
 
 ## The demo
 
-To see the app before installing anything: a pretend server with made-up bots that answer everything, and the app in the iPhone simulator. It needs no T3 Code, no Apple account and no signing, only Bun, Xcode 27 and XcodeGen.
+To see the app before building it for a phone: a pretend server with made-up bots that answer everything, and the app in the iPhone simulator. It needs no T3 Code, no Apple account and no signing, only [Bun](https://bun.sh), Xcode 27 and XcodeGen.
 
 ```sh
 git clone https://github.com/Soren-Starck/t3-bot
@@ -320,9 +414,19 @@ cd t3-bot
 bin/t3bot demo
 ```
 
-Leave it running. In a second terminal, run `cd t3-bot/ios && xcodegen generate && open T3Bot.xcodeproj`, then run the `T3Bot` scheme on an iPhone simulator. On the connect screen, open "No server yet? Try the demo" and tap "Connect to the demo on this Mac". The demo saves nothing and sends no pushes.
+Leave it running. In a second terminal, run `cd t3-bot/ios && xcodegen generate && open T3Bot.xcodeproj`, then run the `T3Bot` scheme on an iPhone simulator. On the connect screen, open "Just looking? Try the demo" and tap "Connect to the demo on this Mac". The demo saves nothing and sends no pushes.
+
+The demo listens on this computer only, which is all the simulator needs. Its token is the public word `demo`, so it stays closed to your network unless you ask: `bin/t3bot demo --lan` opens it to an iPhone on the same Wi-Fi and prints a code to scan. That needs the app already built on the phone ([step 1](#1-build-the-app-with-your-own-team)).
 
 ## Uninstall
+
+Paired with T3 Code:
+
+1. In the app, turn off Settings > Notifications > Ring this phone. That takes the hooks out of T3 Code's Claude settings.
+2. In T3 Code, remove the phone under Settings > Sharing & access.
+3. Delete the app from the iPhone, and the push sender's project on Vercel if you deployed one.
+
+With a server:
 
 ```sh
 deploy/install.sh --uninstall

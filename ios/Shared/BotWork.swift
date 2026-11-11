@@ -11,6 +11,8 @@ struct BotWorkAttributes: ActivityAttributes {
         var text: String
         /// Unix seconds when the message was sent (the timer counts from it).
         var startedAt: Double
+        /// How many cards wait on you across all bots (older pushes have none).
+        var needs: Int? = nil
     }
 
     var agentId: String

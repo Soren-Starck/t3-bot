@@ -1,4 +1,5 @@
 import ActivityKit
+import Network
 import SwiftUI
 import UserNotifications
 import WidgetKit
@@ -13,6 +14,10 @@ struct T3BotApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(store)
+                // One accent: the text colour, as on the primary buttons (blue links, green and orange icons and a
+                // black radio on a blue fill read as four systems).
+                .tint(Color.primary)
+                .toggleStyle(SwitchToggleStyle(tint: .green))
                 .onOpenURL { store.open(url: $0) }
                 .task {
                     store.start()
@@ -42,7 +47,7 @@ struct T3BotApp: App {
                 }
         }
         .onChange(of: phase) { _, p in
-            if p == .active { store.start(); Task { await store.refreshAll() } }
+            if p == .active { store.cameBack() }
             if p == .background { store.flushPending(); store.stop(); store.saveCache() }
         }
     }
@@ -62,6 +67,9 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: store.paired)
         .animation(.easeInOut(duration: 0.25), value: store.showConnect)
+        #if DEBUG
+        .fullScreenCover(item: $store.debugGallery) { GlanceGallery(what: $0.id) }
+        #endif
     }
 }
 
@@ -86,6 +94,8 @@ final class Store: ObservableObject {
     @Published var selectedCard: Card?
     /// The swiping view over everything (Review button, t3bot://review from a widget or a link).
     @Published var showReview = false
+    /// Review opens on its list of cards instead of the deck ("See as a list").
+    @Published var reviewAsList = false
     /// Debug only: the chat that should open with its keyboard up.
     @Published var focusComposer: String?
     /// Debug only: a sheet or search to show for a screen check.
@@ -131,7 +141,22 @@ final class Store: ObservableObject {
     /// A message that could not be sent stays in its chat, marked, until a tap tries again.
     @Published var failed: [String: FailedSend] = [:]
 
-    struct FailedSend: Equatable { let text: String; let images: [Data] }
+    struct FailedSend: Equatable {
+        let text: String
+        let images: [Data]
+        /// The send's own id, kept for a retry (T3 Code keeps a message once per id).
+        var clientId: String = ""
+        /// Where its photos are kept on this phone while it waits (Outgoing).
+        var imageIds: [String] = []
+    }
+    /// The photos of the message on its way, by bot: shown in its bubble at once (Outgoing keeps the pictures).
+    @Published var outgoingImages: [String: [String]] = [:]
+    /// The last message sent to each bot and when: the same words again within a few seconds is a double tap.
+    private var lastSent: [String: (text: String, at: Date)] = [:]
+    /// The last message of mine in each chat when a send started (see loadTimeline).
+    private var outgoingAfter: [String: String] = [:]
+    /// Chats whose last refresh failed, with what to say (the chat keeps showing what it had).
+    @Published var chatProblem: [String: String] = [:]
     /// The chat on screen (or opening), so its own replies do not also ring, and so the bar at the bottom is drawn
     /// by that chat, above its composer, instead of over its last lines.
     @Published var currentAgent: String?
@@ -141,6 +166,18 @@ final class Store: ObservableObject {
     @Published var lastSync: Date?
     /// True when the server answered but refused the token: waiting will not fix it, pairing again will.
     @Published var refused = false
+
+    /// How the link to the server is doing, for Settings > Connection > Details: when it last answered, and what
+    /// went wrong the last time it did not (a short sentence, never a token).
+    struct LinkHealth: Equatable {
+        var lastSuccess: Date?
+        var lastError: String?
+        var lastErrorAt: Date?
+        /// Tries in a row that failed; 0 once the server answers again.
+        var failures = 0
+    }
+    @Published private(set) var link = LinkHealth(lastSuccess: UserDefaults.standard.object(forKey: Store.lastSuccessKey) as? Date)
+    private static let lastSuccessKey = "t3bot.link.lastSuccess"
 
     // MARK: - Connection
 
@@ -157,9 +194,13 @@ final class Store: ObservableObject {
     /// True once the server holds this phone's push token.
     @Published private(set) var pushRegistered = false
     private var deviceToken: String?
+    private var registering = false
     #if DEBUG
     /// Screen checks: a connect screen state to draw (t3bot://debug/connect/<state>).
     @Published var debugConnect: String?
+    /// Screen checks: the widgets or the lock screen drawn in the app (t3bot://debug/gallery/<what>).
+    @Published var debugGallery: DebugGallery?
+    struct DebugGallery: Identifiable { let id: String }
     /// Screen checks: home is held on a made-up state (t3bot://debug/home/<state>) and not refreshed.
     private var frozen = false
     #endif
@@ -177,6 +218,7 @@ final class Store: ObservableObject {
     func connect(_ c: Connection, hello: Hello? = nil) {
         let old = Connection.current
         stop()
+        DirectLink.reset()
         if let old, old.url != c.url {
             if let deviceToken { API.forgetDevice(deviceToken, on: old) }
             reset()
@@ -200,6 +242,8 @@ final class Store: ObservableObject {
     func disconnect() {
         stop()
         if let old = Connection.current, let deviceToken { API.forgetDevice(deviceToken, on: old) }
+        if Connection.current?.isDirect == true { Task { await DirectPush.turnOff() }; directPushOn = false; lastRoster = nil }
+        DirectLink.reset()
         Connection.clear()
         reset()
         hello = nil
@@ -223,6 +267,7 @@ final class Store: ObservableObject {
         selectedCard = nil
         showReview = false
         outgoing = [:]
+        outgoingImages = [:]
         failed = [:]
         doneLocally = []
         justAnswered = []
@@ -233,6 +278,10 @@ final class Store: ObservableObject {
         refused = false
         online = true
         lastSync = nil
+        link = LinkHealth()
+        UserDefaults.standard.removeObject(forKey: Self.lastSuccessKey)
+        offlineRounds = 0
+        refreshing?.cancel(); refreshing = nil; refreshEpoch += 1
         lastPrefetch = .distantPast
         currentAgent = nil
         Store.cache.withLock { $0 = [:] }
@@ -246,15 +295,66 @@ final class Store: ObservableObject {
     /// iOS gave this phone its push token: the server gets it now, and again later if this try fails.
     func registered(deviceToken hex: String) {
         deviceToken = hex
+        #if DEBUG
+        // Simulator push checks: the token where a script can read it (the app's tmp folder).
+        try? hex.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("t3bot-push-token"), atomically: true, encoding: .utf8)
+        #endif
         pushError = nil
         pushRegistered = false
         registerDevice()
     }
 
+    /// A T3 Code pairing: whether its Claude threads ring this phone (DirectPush), and what stops them.
+    @Published var directPushOn = DirectPush.isOn
+    @Published var directPushProblem: String?
+
+    /// Turns notifications on or off for a T3 Code pairing. On: this phone's address goes into T3 Code's Claude hooks.
+    func setDirectPush(_ on: Bool, quiet: Bool = false) {
+        guard Connection.current?.isDirect == true else { return }
+        Task {
+            if on {
+                guard let deviceToken else {
+                    directPushProblem = "This phone has no push token yet. Allow notifications for T3 Bot in iOS Settings."
+                    return
+                }
+                do {
+                    let n = try await DirectPush.turnOn(token: deviceToken)
+                    directPushOn = true
+                    directPushProblem = nil
+                    if !quiet { flash(n == 1 ? "Notifications on" : "Notifications on for \(n) Claude setups") }
+                } catch {
+                    directPushOn = false
+                    directPushProblem = error.localizedDescription
+                    if !quiet { flash(error.localizedDescription, failed: true) }
+                }
+            } else {
+                await DirectPush.turnOff()
+                directPushOn = false
+                directPushProblem = nil
+            }
+        }
+    }
+
     private func registerDevice() {
-        guard paired, !pushRegistered, let deviceToken, let server = Connection.current else { return }
+        // A T3 Code pairing rings through its own hooks: turned on by itself the first time this pairing has a push
+        // token (the person said yes to notifications), kept up to date after that.
+        if let c = Connection.current, c.isDirect, let deviceToken {
+            let asked = "t3bot.direct.push.asked.\(c.environmentId ?? c.url.absoluteString)"
+            if DirectPush.isOn {
+                if DirectPush.saved?.token != deviceToken { setDirectPush(true, quiet: true) }
+            } else if !UserDefaults.standard.bool(forKey: asked) {
+                UserDefaults.standard.set(true, forKey: asked)
+                setDirectPush(true)
+            }
+            pushRegistered = true
+            return
+        }
+        guard paired, !pushRegistered, !registering, let deviceToken, let server = Connection.current else { return }
+        // One at a time: two refreshes close together used to send the token twice.
+        registering = true
         Task {
             let ok = (try? await API.post("v1/devices", ["token": deviceToken, "env": API.apnsEnv])) != nil
+            registering = false
             if ok, server == Connection.current { pushRegistered = true }
         }
     }
@@ -283,24 +383,38 @@ final class Store: ObservableObject {
         var undo: UUID? = nil
     }
 
-    init() { if Connection.current != nil { loadCache() } }
+    init() {
+        #if DEBUG
+        // `-t3botSave` with `-t3botURL ...`: saved like a real pairing, so the extensions (notifications, widgets)
+        // use it too. For simulator checks of pushes and widgets.
+        if ProcessInfo.processInfo.arguments.contains("-t3botSave"), let c = Connection.fromArguments { Connection.save(c) }
+        #endif
+        if Connection.current != nil { loadCache() }
+    }
 
     var needs: [Card] { (home?.needs ?? []).filter { !doneLocally.contains($0.id) } }
 
     // MARK: - One loop for the whole app
 
-    /// Keeps everything fresh whatever screen is open: home every 6 s while a bot works (15 s otherwise, 4 s while the
-    /// server is unreachable), and the open chat every 2 s while its bot works (5 s otherwise). Stops in the background.
-    /// Does nothing until the app is paired.
+    /// Keeps everything fresh whatever screen is open: home every 6 s while a bot works (15 s otherwise; while the
+    /// server is unreachable, after 1, 2, 3, 5 then every 8 s), and the open chat every 2 s while its bot works
+    /// (5 s otherwise). Stops in the background. Does nothing until the app is paired.
     func start() {
         guard paired else { return }
+        watchNetwork()
+        // Paired with T3 Code itself: its streams say when something changed, so the screens follow at once
+        // instead of at the next round of the loops below.
+        if let direct = DirectLink.current {
+            Task { await direct.setOnChange { Task { @MainActor in Store.shared.liveChanged() } } }
+        }
         if homeLoop == nil {
             homeLoop = Task { [weak self] in
                 while !Task.isCancelled {
                     guard let self else { return }
-                    await self.refresh()
-                    let busy = self.home?.agents.contains { $0.mood == "working" || $0.mood == "watching" } ?? false
-                    try? await Task.sleep(for: .seconds(!self.online ? 4 : busy ? 6 : 15))
+                    // A refresh already on its way (the screen just came back) is this round's.
+                    if let running = self.refreshing { await running.value } else { await self.refresh() }
+                    if Task.isCancelled { return }
+                    try? await Task.sleep(for: .seconds(self.nextWait()))
                 }
             }
         }
@@ -317,66 +431,266 @@ final class Store: ObservableObject {
         }
     }
 
-    func stop() {
-        homeLoop?.cancel(); homeLoop = nil
-        chatLoop?.cancel(); chatLoop = nil
+    /// How long the home loop waits before its next round.
+    private func nextWait() -> Double {
+        // A refused token is not fixed by trying again fast.
+        if refused { return 15 }
+        if !online {
+            let wait = Self.offlineWaits[min(offlineRounds, Self.offlineWaits.count - 1)]
+            offlineRounds += 1
+            return wait
+        }
+        let busy = home?.agents.contains { $0.mood == "working" || $0.mood == "watching" } ?? false
+        return busy ? 6 : 15
     }
 
-    func refresh() async {
-        guard paired, let server = Connection.current else { return }
-        #if DEBUG
-        if frozen { return }
-        #endif
-        do {
-            let h: Home = try await API.get("v1/home")
-            // Paired with another server while this was on its way: its answer is not ours any more.
-            guard server == Connection.current else { return }
-            online = true
-            refused = false
-            lastSync = Date()
-            // Two bots with the same id (a hand-edited bot list) must not crash the app: the first one counts.
-            let before = Dictionary((home?.agents ?? []).map { ($0.id, $0.lastReplyAt) }, uniquingKeysWith: { a, _ in a })
-            let stateBefore = Dictionary((home?.agents ?? []).map { ($0.id, "\($0.mood ?? "")|\($0.activity ?? "")|\($0.status)|\($0.lastReplyAt ?? "")") }, uniquingKeysWith: { a, _ in a })
-            justAnswered = Set(h.agents.filter { a in
-                guard let was = before[a.id], let now = a.lastReplyAt else { return false }
-                return was != now
-            }.map(\.id))
-            // The widgets follow the app at once instead of their own 15-minute refresh.
-            if home?.needs.map(\.id) != h.needs.map(\.id) { WidgetCenter.shared.reloadTimelines(ofKind: "needs") }
-            home = h
-            // First launch with this feature: everything already there counts as seen.
-            for a in h.agents where seen[a.id] == nil { seen[a.id] = Date() }
-            UserDefaults.standard.set(seen, forKey: "seen")
-            // A card the server no longer lists is really gone; forget it was hidden.
-            doneLocally = doneLocally.filter { id in h.needs.contains { $0.id == id } }
-            Store.cache.withLock { c in for a in h.agents { c[a.id] = a } }
-            // The extensions (widgets, Live Activity, notifications, share sheet) read the faces from here.
-            FaceShare.sync(h.agents)
-            error = nil
-            registerDevice()
-            if hello == nil { Task { await loadHello() } }
-            try? await UNUserNotificationCenter.current().setBadgeCount(h.badge)
-            if UserDefaults.standard.bool(forKey: "sharephone") { Task { await PhoneSync.push() } }
-            // A bot whose state moved (started, finished, asked, answered): its chat is fetched now, not at the next round.
-            let moved = Set(h.agents.filter { a in stateBefore[a.id] != "\(a.mood ?? "")|\(a.activity ?? "")|\(a.status)|\(a.lastReplyAt ?? "")" }.map(\.id))
-            prefetch(changed: justAnswered.union(moved))
-        } catch {
-            guard server == Connection.current else { return }
-            online = false
-            if case let APIError.status(code, _) = error, code == 401 || code == 403 {
-                refused = true
-                self.error = "\(server.label) refused this phone's token. Pair again to carry on."
-            } else {
-                refused = false
-                if home == nil { self.error = "Can't reach \(server.label) yet." }
+    /// Seconds between tries while the server does not answer: quick at first, never slower than the last one.
+    private static let offlineWaits: [Double] = [1, 2, 3, 5, 8]
+    /// Rounds spent offline in a row. Back to 0 when the server answers, when the app comes back on screen, when
+    /// the network changes and when the person asks to reconnect.
+    private var offlineRounds = 0
+    private var leftAt: Date?
+
+    /// The app is on screen again: connections kept from before may be dead, so everything starts on new ones.
+    func cameBack() {
+        let away = leftAt.map { Date().timeIntervalSince($0) > 3 } ?? false
+        if away { API.rebuildSessions() }
+        leftAt = nil
+        offlineRounds = 0
+        start()
+        Task {
+            // T3 Code directly: a socket kept from before is pinged, and replaced when it no longer answers, before
+            // anything is read through it (a healthy one answers at once, and is kept with what it is sending).
+            if away { await DirectLink.reconnect() }
+            await refreshAll()
+        }
+    }
+
+    // MARK: Network changes
+
+    private var pathMonitor: NWPathMonitor?
+    private var pathSeen: String?
+    private var pathTask: Task<Void, Never>?
+
+    /// Wi-Fi to cellular, a VPN that connects (Tailscale), the network coming back: the app asks the server again at
+    /// once instead of waiting for the next round.
+    private func watchNetwork() {
+        guard pathMonitor == nil else { return }
+        let m = NWPathMonitor()
+        m.pathUpdateHandler = { path in
+            let seen = "\(path.status)|" + path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
+            let usable = path.status == .satisfied
+            Task { @MainActor in Store.shared.networkChanged(seen, usable: usable) }
+        }
+        m.start(queue: DispatchQueue(label: "t3bot.network"))
+        pathMonitor = m
+    }
+
+    private func networkChanged(_ seen: String, usable: Bool) {
+        let first = pathSeen == nil
+        guard seen != pathSeen else { return }
+        pathSeen = seen
+        // The first report only says what the network is at launch.
+        guard !first, paired else { return }
+        pathTask?.cancel()
+        pathTask = Task {
+            // A change comes as a few reports in a row: one reaction, once they settle.
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, UIApplication.shared.applicationState != .background else { return }
+            // What was open on the old network is gone, whatever iOS still thinks.
+            API.rebuildSessions()
+            offlineRounds = 0
+            // T3 Code directly: the socket is pinged, and replaced when the change left it half open.
+            await DirectLink.reconnect()
+            guard !Task.isCancelled else { return }
+            if usable { await refreshAll() }
+        }
+    }
+
+    func stop() {
+        leftAt = Date()
+        homeLoop?.cancel(); homeLoop = nil
+        chatLoop?.cancel(); chatLoop = nil
+        // T3 Code's streams stop a moment later, once what was waiting to be sent has gone (flushPending).
+        if let direct = DirectLink.current {
+            Task {
+                try? await Task.sleep(for: .seconds(3))
+                if UIApplication.shared.applicationState == .background { await direct.pause() }
             }
         }
     }
 
-    /// Back in the foreground: everything fresh at once (home and every bot's chat), never the state saved on disk.
+    private var liveRefresh: Task<Void, Never>?
+    private var lastRoster: Roster?
+
+    /// Something changed in T3 Code: Home and the open chat are read again from the live state (no network),
+    /// a fraction of a second later so a burst of changes is one redraw.
+    func liveChanged() {
+        guard liveRefresh == nil else { return }
+        liveRefresh = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            liveRefresh = nil
+            await refresh()
+            if let id = currentAgent { await loadTimeline(id) }
+        }
+    }
+
+    private var refreshing: Task<Void, Never>?
+    private var refreshStarted = Date.distantPast
+    /// Goes up when a refresh starts and when one is dropped: a run that is no longer the newest changes nothing.
+    private var refreshEpoch = 0
+
+    /// Home, from the server. One at a time: the loop, a push, a tap and the screen coming back all ask for it, and
+    /// two answers out of order would let an old failure hide a newer success. It runs in its own task, so a caller
+    /// that goes away (the loop stopped because the app left the screen) does not cut it into a false "Offline".
+    func refresh() async { await refresh(again: true) }
+
+    /// `again`: after waiting on a run that had already begun, ask once more. That run began before this call, so
+    /// what the caller just did (an action sent, a push that arrived) may not be in it.
+    private func refresh(again: Bool) async {
+        guard paired, Connection.current != nil else { return }
+        #if DEBUG
+        if frozen { return }
+        #endif
+        if let running = refreshing {
+            await running.value
+            guard again, online, !Task.isCancelled else { return }
+            if let next = refreshing { await next.value; return }
+        }
+        refreshEpoch += 1
+        let epoch = refreshEpoch
+        refreshStarted = Date()
+        let run = Task { [weak self] in
+            await self?.refreshOnce(epoch)
+            if let self, self.refreshEpoch == epoch { self.refreshing = nil }
+        }
+        refreshing = run
+        await run.value
+    }
+
+    private func refreshOnce(_ epoch: Int) async {
+        guard let server = Connection.current else { return }
+        let direct = server.isDirect
+        // While all is well: a short first try, then a second one on new connections, before the screens say
+        // Offline (a VPN that just woke up, a connection the server closed while the app slept). Already offline:
+        // one try per round, and the loop is back within seconds.
+        // T3 Code directly reads much more on its first load, and has its own shorter limits inside: the times
+        // here only make sure a call that hangs never holds the app.
+        let limits: [TimeInterval] = online ? (direct ? [15, 30] : [5, 8]) : (direct ? [30] : [6])
+        var failure: Error?
+        for (i, limit) in limits.enumerated() {
+            do {
+                let h: Home = try await API.get("v1/home", timeout: limit)
+                // Paired with another server, or replaced by a newer try, while this was on its way.
+                guard epoch == refreshEpoch, server == Connection.current else { return }
+                await took(h, from: server)
+                return
+            } catch {
+                guard epoch == refreshEpoch, server == Connection.current else { return }
+                // Stopped on purpose: says nothing about the server.
+                if API.wasCancelled(error) { return }
+                failure = error
+                // The server answered, with an error: asking again at once changes nothing.
+                if case APIError.status = error { break }
+                await renewLink(server)
+                // Replaced by a newer try while the link was renewed: this failure is not the news any more.
+                guard epoch == refreshEpoch, server == Connection.current else { return }
+                if i + 1 < limits.count {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard epoch == refreshEpoch, server == Connection.current else { return }
+                }
+            }
+        }
+        if let failure { missed(failure, server) }
+    }
+
+    /// New connections for what comes next: the ones in use may be dead without the phone knowing.
+    private func renewLink(_ server: Connection) async {
+        API.rebuildSessions()
+        // T3 Code directly: the same backend (what it read stays), its wait before the next try started over, and
+        // its socket pinged: one that answers is kept with whatever is being sent on it, so nothing is cut or sent
+        // twice; one that does not is replaced, on a new session. At most 3 s.
+        if server.isDirect { await DirectLink.reconnect() }
+    }
+
+    private func took(_ h: Home, from server: Connection) async {
+        online = true
+        refused = false
+        lastSync = Date()
+        offlineRounds = 0
+        link.lastSuccess = lastSync
+        link.failures = 0
+        UserDefaults.standard.set(lastSync, forKey: Self.lastSuccessKey)
+        // Two bots with the same id (a hand-edited bot list) must not crash the app: the first one counts.
+        let before = Dictionary((home?.agents ?? []).map { ($0.id, $0.lastReplyAt) }, uniquingKeysWith: { a, _ in a })
+        let stateBefore = Dictionary((home?.agents ?? []).map { ($0.id, "\($0.mood ?? "")|\($0.activity ?? "")|\($0.status)|\($0.lastReplyAt ?? "")") }, uniquingKeysWith: { a, _ in a })
+        justAnswered = Set(h.agents.filter { a in
+            guard let was = before[a.id], let now = a.lastReplyAt else { return false }
+            return was != now
+        }.map(\.id))
+        // The widgets follow the app at once instead of their own 15-minute refresh.
+        if home?.needs.map(\.id) != h.needs.map(\.id) { WidgetCenter.shared.reloadTimelines(ofKind: "needs") }
+        home = h
+        // First launch with this feature: everything already there counts as seen.
+        for a in h.agents where seen[a.id] == nil { seen[a.id] = Date() }
+        UserDefaults.standard.set(seen, forKey: "seen")
+        // A card the server no longer lists is really gone; forget it was hidden.
+        doneLocally = doneLocally.filter { id in h.needs.contains { $0.id == id } }
+        Store.cache.withLock { c in for a in h.agents { c[a.id] = a } }
+        // The extensions (widgets, Live Activity, notifications, share sheet) read the faces from here.
+        FaceShare.sync(h.agents)
+        if server.isDirect {
+            let roster = Roster.from(h)
+            if roster != lastRoster {
+                roster.save()
+                // A bot made or removed: the hooks learn which threads' answers ring.
+                if let before = lastRoster, Set(roster.bots.keys) != Set(before.bots.keys) { Task { await DirectPush.sync() } }
+                lastRoster = roster
+            }
+        }
+        error = nil
+        registerDevice()
+        if hello == nil { Task { await loadHello() } }
+        try? await UNUserNotificationCenter.current().setBadgeCount(h.badge)
+        if UserDefaults.standard.bool(forKey: "sharephone") { Task { await PhoneSync.push() } }
+        // A bot whose state moved (started, finished, asked, answered): its chat is fetched now, not at the next round.
+        let moved = Set(h.agents.filter { a in stateBefore[a.id] != "\(a.mood ?? "")|\(a.activity ?? "")|\(a.status)|\(a.lastReplyAt ?? "")" }.map(\.id))
+        prefetch(changed: justAnswered.union(moved))
+    }
+
+    private func missed(_ failure: Error, _ server: Connection) {
+        link.lastError = API.reason(failure, server)
+        link.lastErrorAt = Date()
+        link.failures += 1
+        let auth: Bool
+        if case let APIError.status(code, _) = failure, code == 401 || code == 403 { auth = true } else { auth = false }
+        // Woken by a push with the screen off, iOS gives the app little time and sometimes no network: that is
+        // noted in Settings, and the screens are judged again when someone looks at them.
+        if !auth, UIApplication.shared.applicationState == .background { return }
+        online = false
+        if auth {
+            refused = true
+            error = "\(server.label) refused this phone's token. Pair again to carry on."
+        } else {
+            refused = false
+            if home == nil { error = "Can't reach \(server.label) yet." }
+        }
+    }
+
+    /// Back in the foreground, "Reconnect now", pull to refresh: everything fresh at once (home and every bot's
+    /// chat), never the state saved on disk, and never behind a try that is stuck on an old connection.
     func refreshAll() async {
         lastPrefetch = .distantPast
-        await refresh()
+        offlineRounds = 0
+        if let running = refreshing, Date().timeIntervalSince(refreshStarted) > 1 {
+            running.cancel()
+            refreshing = nil
+            refreshEpoch += 1
+            API.rebuildSessions()
+        } else if refreshing == nil, !online {
+            API.rebuildSessions()
+        }
+        await refresh(again: false)
         if online, hello == nil { await loadHello() }
     }
 
@@ -391,11 +705,26 @@ final class Store: ObservableObject {
 
     func loadTimeline(_ id: String) async {
         guard let server = Connection.current else { return }
-        if let t: Timeline = try? await API.get("v1/agents/\(id)"), server == Connection.current {
+        let t: Timeline
+        do {
+            t = try await API.get("v1/agents/\(id)")
+        } catch {
+            if server == Connection.current { chatProblem[id] = error.localizedDescription }
+            return
+        }
+        if server == Connection.current {
+            chatProblem[id] = nil
             timelines[id] = t
-            if let out = outgoing[id], let last = t.entries.last(where: { $0.type == "me" }),
-               last.text == out || (out.contains(" photo") && Ago.date(last.at).map { Date().timeIntervalSince($0) < 120 } == true) {
-                outgoing[id] = nil
+            if let out = outgoing[id] {
+                // Only a message of mine that came after the send counts: an older one with the same words ("Yes")
+                // must not take the waiting bubble away.
+                var recent = t.entries[...]
+                if let mark = outgoingAfter[id], !mark.isEmpty, let i = recent.lastIndex(where: { $0.id == mark }) { recent = recent[(i + 1)...] }
+                let withPhotos = !(outgoingImages[id] ?? []).isEmpty
+                if recent.contains(where: { $0.type == "me" && $0.text == out && (!withPhotos || !($0.images ?? []).isEmpty) }) {
+                    outgoing[id] = nil
+                    outgoingImages[id] = nil
+                }
             }
         }
     }
@@ -454,10 +783,13 @@ final class Store: ObservableObject {
             if parts.first == "connect", let what = parts.dropFirst().first { debugConnect = what; showConnect = true }
             // t3bot://debug/home/empty|solo|many|loading|offline|refused|live: home on a made-up state, held until "live".
             if parts.first == "home", let what = parts.dropFirst().first { debugHome(what) }
+            // t3bot://debug/gallery/widgets|lock: the widgets and the Live Activity, drawn in the app (GlanceGallery).
+            if parts.first == "gallery", let what = parts.dropFirst().first { path = NavigationPath(); debugGallery = DebugGallery(id: what) }
             // t3bot://debug/pusherror: Settings with a push registration failure.
             if parts.first == "pusherror" { pushError = "Push not available: no valid aps-environment entitlement found."; debugSheet = "settings" }
             if parts.first == "route", let what = parts.dropFirst().first {
-                path = NavigationPath(); path.append(what == "know" ? Route.know : Route.allNeeds)
+                path = NavigationPath()
+                if what == "know" { path.append(Route.know) } else { reviewAsList = true; showReview = true }
             }
             if parts.first == "card", let id = parts.dropFirst().first, let c = home?.needs.first(where: { $0.id.hasSuffix(id) }) { selectedCard = c }
             // Everything else under t3bot://debug/ (scroll, detent, tap, menu, toast, and the action links that call
@@ -524,7 +856,16 @@ final class Store: ObservableObject {
         let kind = action?.kind ?? actionId
         let run = {
             let goesToBot = kind == "handle" || kind == "message"
-            if goesToBot { self.sheetReset += 1; self.open(agent: card.agent) }
+            if goesToBot {
+                self.sheetReset += 1
+                // From Review (a cover over everything): Review closes first, or the chat opened under it.
+                if self.showReview {
+                    self.showReview = false
+                    Task { try? await Task.sleep(for: .milliseconds(450)); self.open(agent: card.agent) }
+                } else {
+                    self.open(agent: card.agent)
+                }
+            }
             self.doneLocally.insert(card.id)
             let who = self.agent(card.agent)?.name ?? "the bot"
             let done = label ?? (kind == "done" ? "Marked done" : kind == "snooze" ? "Snoozed" : goesToBot ? "Sent to \(who)" : "Done")
@@ -568,10 +909,36 @@ final class Store: ObservableObject {
         Haptics.success()
         doneLocally.insert(card.id)
         let who = agent(card.agent)?.name ?? "the bot"
+        let direct = Connection.current?.isDirect == true
         // A bot's own thread is titled "%BOT <name>" on the server: say the name, as a person would.
-        perform("Answer sent to \(CardHeader.threadName(card.threadTitle ?? who))", undo: { self.doneLocally.remove(card.id) }) {
-            try await API.post("v1/answer", body)
+        let sentTo = "Answer sent to \(CardHeader.threadName(card.threadTitle ?? who))"
+        perform(sentTo, quiet: true, undo: { self.doneLocally.remove(card.id) }) {
+            var asMessage = false
+            do {
+                let r = try await API.post("v1/answer", body)
+                asMessage = r.error == "sent-as-message"
+            } catch let APIError.status(code, _) where !direct && code != 401 && code != 403 {
+                // The question closed before the answer (its session ended, or it was answered elsewhere). Not a
+                // dead end: the answer goes to the bot as a message, in the words that were picked.
+                let text = Self.answerWords(card, body)
+                guard !text.isEmpty, !card.agent.isEmpty else { throw APIError.status(code, "") }
+                try await API.post("v1/agents/\(card.agent)/send", ["text": "My answer to the question in \(CardHeader.threadName(card.threadTitle ?? who)):\n\(text)",
+                                                                     "clientId": "answer-\(card.id.hashValue.magnitude)"])
+                asMessage = true
+            }
+            self.flash(asMessage ? "That question had closed. Your answer went to \(who) as a message." : sentTo)
         }
+    }
+
+    /// An answer as words: "Question: choice" per question, or the decision.
+    static func answerWords(_ card: Card, _ body: [String: Any]) -> String {
+        if let d = body["decision"] as? String { return d == "accept" ? "Approved." : "Declined." }
+        let answers = body["answers"] as? [String: Any] ?? [:]
+        return (card.questions ?? []).compactMap { q in
+            guard let v = answers[q.id] else { return nil }
+            let said = (v as? [String])?.joined(separator: ", ") ?? (v as? String) ?? ""
+            return said.isEmpty ? nil : "\(q.question): \(said)"
+        }.joined(separator: "\n")
     }
 
     /// The bot's Live Activity while it works on what was just sent (lock screen and Dynamic Island).
@@ -580,7 +947,7 @@ final class Store: ObservableObject {
         for act in Activity<BotWorkAttributes>.activities where act.attributes.agentId == agentId {
             Task { await act.end(nil, dismissalPolicy: .immediate) }
         }
-        let state = BotWorkAttributes.ContentState(status: "working", text: "", startedAt: Date().timeIntervalSince1970)
+        let state = BotWorkAttributes.ContentState(status: "working", text: "", startedAt: Date().timeIntervalSince1970, needs: needs.count)
         guard let act = try? Activity.request(attributes: BotWorkAttributes(agentId: agentId, agentName: a.name, agentColor: a.color),
                                               content: .init(state: state, staleDate: Date().addingTimeInterval(3600)), pushType: .token) else { return }
         Task {
@@ -595,23 +962,47 @@ final class Store: ObservableObject {
     /// The answer landed: show its first line, then let the activity go.
     func endLive(_ agentId: String, text: String) {
         for act in Activity<BotWorkAttributes>.activities where act.attributes.agentId == agentId {
-            let state = BotWorkAttributes.ContentState(status: "answered", text: String(text.prefix(140)), startedAt: act.content.state.startedAt)
+            let state = BotWorkAttributes.ContentState(status: "answered", text: String(text.prefix(140)), startedAt: act.content.state.startedAt, needs: needs.count)
             Task { await act.end(.init(state: state, staleDate: nil), dismissalPolicy: .after(Date().addingTimeInterval(240))) }
         }
     }
 
-    /// Shows the message at once in the bot's chat, sends it behind.
-    func send(_ text: String, to agentId: String, images: [Data] = [], onFail: @escaping () -> Void = {}) {
+    /// Shows the message at once in the bot's chat, sends it behind. `clientId` is this message's own id: the
+    /// automatic second try and a tap on "Not sent" reuse it, so the bot never gets it twice.
+    func send(_ text: String, to agentId: String, images: [Data] = [], clientId: String? = nil, onFail: @escaping () -> Void = {}) {
+        // The same words to the same bot within a few seconds, with no failure in between: a double tap.
+        if clientId == nil, images.isEmpty, let last = lastSent[agentId], last.text == text, Date().timeIntervalSince(last.at) < 4 { return }
+        lastSent[agentId] = (text, Date())
         Haptics.tap()
         startLive(agentId)
-        failed[agentId] = nil
-        outgoing[agentId] = images.isEmpty ? text : [text, "[\(images.count) photo\(images.count == 1 ? "" : "s")]"].filter { !$0.isEmpty }.joined(separator: "\n")
-        perform("Sent", quiet: true, undo: { self.outgoing[agentId] = nil; self.failed[agentId] = FailedSend(text: text, images: images); onFail() }) {
-            var body: [String: Any] = ["text": text]
+        // An earlier message that did not leave stays until it is sent again or deleted, unless this is that one.
+        if let f = failed[agentId], clientId != nil, f.clientId == clientId { failed[agentId] = nil }
+        // Where the chat stood: the message counts as arrived only once a new one of mine appears after this.
+        outgoingAfter[agentId] = timelines[agentId]?.entries.last(where: { $0.type == "me" })?.id ?? ""
+        let id = clientId ?? UUID().uuidString.lowercased()
+        let photoIds = images.map { Outgoing.put($0) }
+        // A bare slash command (/compact) never shows in the chat: no waiting bubble for it.
+        let slash = images.isEmpty && text.range(of: "^/[a-z-]+$", options: .regularExpression) != nil
+        outgoing[agentId] = slash ? nil : text
+        outgoingImages[agentId] = slash ? nil : photoIds
+        perform("Sent", quiet: true, undo: {
+            self.outgoing[agentId] = nil
+            self.outgoingImages[agentId] = nil
+            self.lastSent[agentId] = nil
+            self.failed[agentId] = FailedSend(text: text, images: images, clientId: id, imageIds: photoIds)
+            onFail()
+        }) {
+            var body: [String: Any] = ["text": text, "clientId": id]
             if !images.isEmpty { body["images"] = images.map { $0.base64EncodedString() } }
             try await API.post("v1/agents/\(agentId)/send", body)
             await self.loadTimeline(agentId)
         }
+    }
+
+    /// True when the server did answer (with an error): the connection itself is fine.
+    private static func answered(_ error: Error) -> Bool {
+        if case APIError.status = error { return true }
+        return false
     }
 
     /// Requests of `perform` still on their way: leaving the app waits for them (`flushPending`).
@@ -632,7 +1023,11 @@ final class Store: ObservableObject {
                     break
                 } catch {
                     lastError = error
-                    if attempt == 0 { try? await Task.sleep(for: .seconds(1.5)) }
+                    // A network failure: the second try goes out on new connections.
+                    if attempt == 0 {
+                        if !Self.answered(error) { API.rebuildSessions() }
+                        try? await Task.sleep(for: .seconds(1.5))
+                    }
                 }
             }
             inFlight -= 1

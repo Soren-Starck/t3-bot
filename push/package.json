@@ -1,0 +1,7 @@
+{
+  "name": "t3bot-push",
+  "private": true,
+  "type": "module",
+  "description": "Push sender for T3 Bot paired with T3 Code: Claude Code hooks ring it, it pushes to the phone.",
+  "scripts": { "test": "bun test" }
+}

@@ -145,6 +145,7 @@ struct ChatLoadFailed: View {
             Image(systemName: online ? "exclamationmark.bubble" : "wifi.slash")
                 .font(.system(size: 32))
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Text("Can't load this chat").font(.headline)
             Text(online ? "The server did not answer." : "The server cannot be reached right now.")
                 .font(.subheadline)

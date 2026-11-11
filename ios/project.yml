@@ -21,7 +21,7 @@ settings:
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "26.0"
     TARGETED_DEVICE_FAMILY: "1"
-    MARKETING_VERSION: "0.2.0"
+    MARKETING_VERSION: "0.3.0"
     CURRENT_PROJECT_VERSION: "1"
 
 # In every target:
@@ -38,12 +38,19 @@ targets:
   T3Bot:
     type: application
     platform: iOS
+    scheme:
+      testTargets: [T3BotUITests]
     sources:
       - path: T3Bot
         excludes: [BoopFace/*]
       - path: T3Bot/BoopFace
         buildPhase: resources
       - path: Shared
+      - path: Direct/Sources/T3Direct
+      # The stock faces (188 small PNGs), so a T3 Code pairing shows them with no server.
+      - path: ../avatars/skins
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: T3BotNotify
         embed: true
@@ -64,15 +71,20 @@ targets:
         T3BotURL: $(T3BOT_URL)
         T3BotToken: $(T3BOT_TOKEN)
         T3BotKeychainGroup: $(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared
-        T3BotAPNSEnv: sandbox
+        # sandbox or production: the build setting T3BOT_APNS_ENV (Config/T3Bot.xcconfig).
+        T3BotAPNSEnv: $(T3BOT_APNS_ENV)
+        # The push sender a T3 Code pairing rings this phone through (push/ in the repo): a host name only.
+        T3BotPushHost: $(T3BOT_PUSH_HOST)
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         LSApplicationQueriesSchemes: [t3code]
         NSUserActivityTypes: [INSendMessageIntent]
         NSSupportsLiveActivities: true
+        # A bot's answer can end its Live Activity while the app sleeps (a reply push carries content-available).
+        UIBackgroundModes: [remote-notification]
         NSFaceIDUsageDescription: T3 Bot asks for Face ID before an action you marked as needing it, such as a payment or a release.
-        NSCameraUsageDescription: T3 Bot uses the camera to scan the pairing code your Mac shows.
-        NSLocalNetworkUsageDescription: T3 Bot connects to your T3 Bot server when it is on the same network as this phone.
+        NSCameraUsageDescription: T3 Bot uses the camera to scan the pairing code T3 Code shows.
+        NSLocalNetworkUsageDescription: T3 Bot connects to T3 Code, or to your T3 Bot server, when it is on the same network as this phone.
         NSCalendarsFullAccessUsageDescription: Your bots read your calendar to plan around it, and can propose events you add yourself.
         NSContactsUsageDescription: Your bots look up who a draft message is for. Nothing is sent without you.
         CFBundleURLTypes:
@@ -104,6 +116,8 @@ targets:
       - path: T3BotNotify
       - path: Shared/Connection.swift
       - path: Shared/SharedFaces.swift
+      - path: Shared/DirectLink.swift
+      - path: Direct/Sources/T3Direct
     info:
       path: T3BotNotify/Info.plist
       properties:
@@ -136,6 +150,7 @@ targets:
     sources:
       - path: T3BotWidgets
       - path: Shared
+      - path: Direct/Sources/T3Direct
     info:
       path: T3BotWidgets/Info.plist
       properties:
@@ -168,6 +183,8 @@ targets:
       - path: T3BotShare
       - path: Shared/Connection.swift
       - path: Shared/SharedFaces.swift
+      - path: Shared/DirectLink.swift
+      - path: Direct/Sources/T3Direct
     info:
       path: T3BotShare/Info.plist
       properties:
@@ -197,3 +214,16 @@ targets:
         CODE_SIGN_STYLE: $(T3BOT_SIGN_STYLE)
         CODE_SIGN_IDENTITY: $(T3BOT_SIGN_IDENTITY)
         "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": $(T3BOT_PROFILE_SHARE)
+
+  # Simulator screen checks only (AllowNotifications answers iOS's notification question). Not part of a release.
+  T3BotUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: T3BotUITests
+    dependencies:
+      - target: T3Bot
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: T3Bot

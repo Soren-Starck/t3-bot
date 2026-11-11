@@ -30,17 +30,22 @@ enum PhoneSync {
 
     /// At most every 30 minutes, when the app is open.
     static func push(force: Bool = false) async {
+        // A T3 Code pairing has no server to keep the snapshot: nothing is read from the phone.
+        guard Connection.current?.isDirect != true else { return }
         guard force || Date().timeIntervalSince(lastPush) > 1800 else { return }
         lastPush = Date()
         let iso = ISO8601DateFormatter()
         var calendar: [[String: Any]] = []
         if EKEventStore.authorizationStatus(for: .event) == .fullAccess {
-            let start = Calendar.current.date(byAdding: .day, value: -1, to: Date())!
-            let end = Calendar.current.date(byAdding: .day, value: 14, to: Date())!
+            let start = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date().addingTimeInterval(-86400)
+            let end = Calendar.current.date(byAdding: .day, value: 14, to: Date()) ?? Date().addingTimeInterval(14 * 86400)
             let pred = events.predicateForEvents(withStart: start, end: end, calendars: nil)
-            calendar = events.events(matching: pred).prefix(400).map { e in
-                var d: [String: Any] = ["title": e.title ?? "", "start": iso.string(from: e.startDate), "end": iso.string(from: e.endDate),
-                                        "allDay": e.isAllDay, "calendar": e.calendar.title]
+            calendar = events.events(matching: pred).prefix(400).compactMap { e -> [String: Any]? in
+                // EventKit hands the dates and the calendar over as implicitly unwrapped: an event missing one
+                // (seen on broken subscribed calendars) would crash the app here.
+                guard let from = e.startDate, let to = e.endDate else { return nil }
+                var d: [String: Any] = ["title": e.title ?? "", "start": iso.string(from: from), "end": iso.string(from: to),
+                                        "allDay": e.isAllDay, "calendar": e.calendar?.title ?? ""]
                 if let l = e.location, !l.isEmpty { d["location"] = l }
                 return d
             }
@@ -174,6 +179,8 @@ struct SettingsSheet: View {
     /// The server did not hand over its settings: said in their place, with a way to try again.
     @State private var loadFailed = false
     @State private var loading = false
+    /// Paired with T3 Code itself: no T3 Bot server, so no morning brief and nowhere to share the phone's calendar.
+    private var direct: Bool { Connection.current?.isDirect == true }
 
     var body: some View {
         NavigationStack {
@@ -182,19 +189,20 @@ struct SettingsSheet: View {
                 SettingsNotificationsSection()
                 if let binding = Binding($s) {
                     Section {
-                        Toggle("Use quiet hours", isOn: binding.quiet.enabled)
+                        Toggle("Use quiet hours", isOn: binding.quiet.enabled).tint(.green)
                         if binding.wrappedValue.quiet.enabled {
                             DatePicker("From", selection: time(binding.quiet.from), displayedComponents: .hourAndMinute)
                             DatePicker("To", selection: time(binding.quiet.to), displayedComponents: .hourAndMinute)
-                            Toggle("Alarms still ring", isOn: binding.quiet.alarms)
+                            Toggle("Alarms still ring", isOn: binding.quiet.alarms).tint(.green)
                         }
                     } header: {
-                        Text("Quiet hours")
+                        ListHeader(text: "Quiet hours")
                     } footer: {
                         Text("Nothing contacts you in these hours: pushes wait and arrive as one summary when they end. Alarms are money at risk or something down.")
                     }
+                    if !direct {
                     Section {
-                        Toggle("Send a morning brief", isOn: binding.brief.enabled)
+                        Toggle("Send a morning brief", isOn: binding.brief.enabled).tint(.green)
                         if binding.wrappedValue.brief.enabled {
                             Picker("When", selection: Binding(
                                 get: { binding.wrappedValue.brief.at == "quiet-end" ? "quiet-end" : "time" },
@@ -214,9 +222,10 @@ struct SettingsSheet: View {
                             }
                         }
                     } header: {
-                        Text("Morning brief")
+                        ListHeader(text: "Morning brief")
                     } footer: {
                         Text("Five short lines: what needs you most today, anything broken, how the night went.")
+                    }
                     }
                     Section {
                         ForEach(binding.wrappedValue.quickReplies, id: \.self) { Text($0) }
@@ -229,7 +238,7 @@ struct SettingsSheet: View {
                             }
                         }
                     } header: {
-                        Text("Quick replies")
+                        ListHeader(text: "Quick replies")
                     } footer: {
                         Text("Each bot suggests replies for its own last message. Replies you add here show when a bot asks you something and suggests none. Swipe one to remove it.")
                     }
@@ -245,11 +254,19 @@ struct SettingsSheet: View {
                             }
                         }
                     } header: {
-                        Text("Quiet hours, brief and replies")
+                        ListHeader(text: direct ? "Quiet hours and replies" : "Quiet hours, brief and replies")
                     } footer: {
-                        Text("Quiet hours, the morning brief and quick replies are kept on the server, so they show once it answers.")
+                        Text(direct ? "Quiet hours and quick replies show once T3 Code answers."
+                             : "Quiet hours, the morning brief and quick replies are kept on the server, so they show once it answers.")
                     }
                 }
+                if direct {
+                    // One quiet line where the two server features would be, so nobody looks for them.
+                    Section {
+                        Text("The morning brief and sharing your calendar and contacts need a T3 Bot server. This phone is connected to T3 Code itself.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                } else {
                 Section {
                     Toggle("Share calendar and contacts", isOn: Binding(get: { share }, set: { v in
                         busy = true
@@ -262,15 +279,17 @@ struct SettingsSheet: View {
                             busy = false
                         }
                     }))
+                    .tint(.green)
                     .disabled(busy)
                     if shareStuck {
                         Label("Still on: the server could not be reached to remove its copy. Try again when it is back.", systemImage: "wifi.slash")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 } header: {
-                    Text("Calendar and contacts")
+                    ListHeader(text: "Calendar and contacts")
                 } footer: {
                     Text("Your bots can read your iPhone calendar (yesterday to two weeks ahead) and contacts, kept on your server only. They never send anything: they leave drafts that open in Messages, Mail or Calendar, and you press Send yourself.")
+                }
                 }
                 SettingsAboutSection()
             }

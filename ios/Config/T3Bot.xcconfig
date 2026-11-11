@@ -22,10 +22,18 @@ T3BOT_PROFILE_WIDGETS =
 T3BOT_PROFILE_SHARE =
 
 // A connection the build carries, so the app works with no pairing step: set by
-// ios/scripts/write-local-config.sh. Empty here: a plain clone opens on the connect screen and is paired
-// with `t3bot pair`. In an xcconfig a URL is written https:/$()/host:8809, because // starts a comment.
+// ios/scripts/write-local-config.sh. Empty here: a plain clone opens on the connect screen and pairs by
+// scanning the link from T3 Code's Settings > Sharing & access, or with a T3 Bot server through
+// `t3bot pair`. In an xcconfig a URL is written https:/$()/host:8809, because // starts a comment.
 T3BOT_URL =
 T3BOT_TOKEN =
+// The push sender for T3 Code pairings (a host name; push/README.md). Empty here: a sender can only ring
+// an app signed by its own Apple team, so each developer deploys theirs and sets it with
+// ios/scripts/setup.sh --push-host. Empty: no notifications in that mode, and Settings says so.
+T3BOT_PUSH_HOST =
+// Apple's push environment this build registers with. sandbox is right for a development build;
+// TestFlight and App Store builds need production (set it in Local.xcconfig).
+T3BOT_APNS_ENV = sandbox
 
 // Only for ios/scripts/install-on-iphone.sh and write-local-config.sh, the route for building on one Mac
 // from another. Xcode does not use them. Set them in Local.xcconfig or in the environment:

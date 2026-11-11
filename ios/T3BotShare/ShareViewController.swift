@@ -55,8 +55,12 @@ final class ShareModel: ObservableObject {
                     url = u.absoluteString
                 } else if p.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                     if let data = try? await p.loadItem(forTypeIdentifier: UTType.image.identifier) {
-                        let img = (data as? UIImage) ?? (data as? URL).flatMap { UIImage(contentsOfFile: $0.path) } ?? (data as? Data).flatMap(UIImage.init(data:))
-                        if let jpg = img?.uploadJPEG(), images.count < 4 { images.append(jpg) }
+                        // Decoded, scaled and encoded off the main thread: the sheet stays alive while a big photo loads.
+                        let jpg = await Task.detached(priority: .userInitiated) { () -> Data? in
+                            let img = (data as? UIImage) ?? (data as? URL).flatMap { UIImage(contentsOfFile: $0.path) } ?? (data as? Data).flatMap(UIImage.init(data:))
+                            return img?.uploadJPEG()
+                        }.value
+                        if let jpg, images.count < 4 { images.append(jpg) }
                     }
                 } else if p.hasItemConformingToTypeIdentifier(UTType.plainText.identifier), let t = try? await p.loadItem(forTypeIdentifier: UTType.plainText.identifier) as? String {
                     text = t
@@ -70,7 +74,7 @@ final class ShareModel: ObservableObject {
     /// in the app a moment ago is the one used.
     func loadBots() async {
         phase = .loading
-        guard let r = Connection.load()?.request("v1/home", timeout: 10) else {
+        guard let c = Connection.load() else {
             phase = .notPaired
             return
         }
@@ -78,11 +82,25 @@ final class ShareModel: ObservableObject {
             let agents: [Bot]
             var chief: String? = nil
         }
-        guard let (data, resp) = try? await URLSession.shared.data(for: r) else {
-            phase = .unreachable
-            return
+        var data = Data()
+        var code = 0
+        if c.isDirect {
+            // Paired with T3 Code itself: the bots come from T3 Code, over HTTP.
+            do {
+                data = try JSONEncoder().encode(try await DirectLink.backend(c).home())
+                code = 200
+            } catch {
+                code = ((error as? T3Error)?.isAuth ?? false) ? 401 : 0
+                if code == 0 { phase = .unreachable; return }
+            }
+        } else {
+            guard let r = c.request("v1/home", timeout: 10), let (d, resp) = try? await URLSession.shared.data(for: r) else {
+                phase = .unreachable
+                return
+            }
+            data = d
+            code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         }
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 || code == 403 {
             phase = .refused
             return
@@ -110,15 +128,31 @@ final class ShareModel: ObservableObject {
         phase = .ready
     }
 
+    private let shareId = UUID().uuidString.lowercased()
+
     func send() {
-        guard canSend else { return }
+        guard canSend, !sending else { return }
         sending = true
         error = nil
         var body: [String: Any] = ["agent": bot, "note": note]
         if let url { body["url"] = url }
         if let text { body["text"] = text }
         if !images.isEmpty { body["images"] = images.map { $0.base64EncodedString() } }
+        // One id for this share: a second tap or a retry is the same message to T3 Code.
+        body["clientId"] = shareId
         Task {
+            if let c = Connection.load(), c.isDirect {
+                do {
+                    _ = try await DirectRouter.post(DirectLink.backend(c), "v1/share", body)
+                    context?.completeRequest(returningItems: nil)
+                } catch {
+                    self.error = ((error as? T3Error)?.isAuth ?? false)
+                        ? "T3 Code refused this phone's token. Open T3 Bot and connect it again."
+                        : "Could not reach T3 Code, so nothing was sent. \(error.localizedDescription)"
+                    sending = false
+                }
+                return
+            }
             do {
                 guard var r = Connection.load()?.request("v1/share", timeout: 30) else { throw URLError(.badURL) }
                 r.httpMethod = "POST"
@@ -273,9 +307,15 @@ struct ShareFace: View {
 
 extension UIImage {
     func uploadJPEG() -> Data? {
-        let longest = max(size.width, size.height)
+        // Counted in pixels and drawn at one pixel per point. The default renderer draws at the screen's scale,
+        // so a photo became 4800 px, not 1600: about 70 MB of bitmap in an extension iOS stops near 120 MB.
+        let w = size.width * scale, h = size.height * scale
+        let longest = max(w, h)
+        guard longest > 0 else { return nil }
         let k = longest > 1600 ? 1600 / longest : 1
-        let target = CGSize(width: size.width * k, height: size.height * k)
-        return UIGraphicsImageRenderer(size: target).image { _ in draw(in: CGRect(origin: .zero, size: target)) }.jpegData(compressionQuality: 0.8)
+        let target = CGSize(width: w * k, height: h * k)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: target, format: format).image { _ in draw(in: CGRect(origin: .zero, size: target)) }.jpegData(compressionQuality: 0.8)
     }
 }

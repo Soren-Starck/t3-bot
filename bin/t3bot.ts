@@ -9,19 +9,22 @@
  *   t3bot pair [--url <address>] [--no-qr] [--invert] [--link-only]
  *       Prints the pairing link and a QR code: scan it with the iPhone camera and the app opens connected.
  *   t3bot doctor     Checks T3 Code, the config, the token, the server, the address for the phone and the push key.
- *   t3bot demo [--port 8810] [--frozen] [--host <address to listen on>] [--url <address for the phone>] [--no-qr]
+ *   t3bot demo [--port 8810] [--frozen] [--lan] [--host <address to listen on>] [--url <address for the phone>] [--no-qr]
  *       Starts the demo server (invented bots, no T3 Code needed) and prints its pairing link.
- *   t3bot connect '<pairing link>'
+ *       It listens on this computer only (127.0.0.1): the demo's token is public. --lan opens it to your network
+ *       for a phone on the same Wi-Fi (also T3BOT_DEMO_HOST=0.0.0.0, or --host with one address to listen on).
+ *   t3bot connect '<pairing link>' [--force]
  *       On another computer: saves the server's address and token, so `t3bot` there talks to your server.
+ *       --force replaces a token that computer already holds.
  *
  * For agents:
  *   t3bot notify --kind alarm|approve|do|know --title "..." [--body "..."] [--agent <bot id>] [--link URL] [--key STABLE-KEY]
- *     alarm    rings at once, even during quiet hours (something down, money at risk, someone stuck)
+ *     alarm    rings at once, even during quiet hours unless the app's settings say otherwise (something down, money at risk)
  *     approve  the work is done and needs a yes; rings unless it is quiet hours (then in the morning)
  *     do       only the person can do it (a signature, a login, a purchase); rings unless it is quiet hours
  *     know     done without them; nothing rings, it goes into the evening digest
  *   --agent is the bot the card belongs to (ids in `t3bot roster`); without it, the Chief.
- *   --key makes a note replaceable: the same key updates it instead of adding a second one.
+ *   --kind is `know` when left out. --key makes a note replaceable: the same key updates it instead of adding a second one.
  *   Richer cards (all optional, repeatable where it makes sense):
  *     --field "Amount=24 EUR"        a labelled value          --check "Tests=pass|fail|pending"   a check line
  *     --edit "text" [--edit-label "Reply"]   text the person can change before acting
@@ -30,7 +33,7 @@
  *
  *   t3bot draft --agent <id> --to "<name, number or email>" --text "..." [--via imessage|mail] [--subject "..."]
  *   t3bot draft --agent <id> --event "<title>" --start <ISO> --end <ISO> [--location "..."]
- *     A message or calendar event for the person to send or add themselves. It shows as a card; nothing goes
+ *     (--key works here too.) A message or calendar event for the person to send or add themselves. It shows as a card; nothing goes
  *     out until they tap Send in the iPhone's own composer. Never say a draft was sent.
  *   t3bot phone calendar          the iPhone calendar (next two weeks), when it was shared in T3 Bot
  *   t3bot phone contacts <name>   matching contacts from the iPhone
@@ -42,6 +45,7 @@
  *   t3bot version
  *
  * The server's address comes from $T3BOT_URL, else the file `t3bot connect` wrote, else this computer.
+ * Exit codes: 0 done, 1 the server could not be reached or refused it, 2 the command was not written right.
  */
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'fs'
 import { networkInterfaces } from 'os'
@@ -86,14 +90,37 @@ async function call(path: string, body?: unknown): Promise<{ status: number; dat
       method: body ? 'POST' : 'GET',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(body ? 320_000 : 30_000),
+      signal: AbortSignal.timeout(30_000),
     })
+    // A token the server does not know: said in words, since the server's own answer is only "unauthorized".
+    if (r.status === 401) {
+      fail(`The T3 Bot server at ${base} refused the token ${process.env.T3BOT_TOKEN ? 'in $T3BOT_TOKEN' : `in ${tilde(TOKEN_FILE)}`}. ` +
+        `It belongs to another server, or the server's token changed: run \`t3bot pair\` on the server and \`t3bot connect '<link>'\` here.`, 1)
+    }
     return { status: r.status, data: await r.json().catch(() => ({})) as any }
   } catch (e) {
     return fail(`The T3 Bot server at ${base} did not answer (${String((e as any)?.message ?? e).slice(0, 120)}). ` +
-      `Is it running? \`t3bot doctor\` checks.`)
+      `Is it running? \`t3bot doctor\` checks.`, 1)
   }
 }
+/** Why the server said no, in its own words when it gave some. */
+const refusal = (r: { status: number; data: any }) => (typeof r.data?.error === 'string' && r.data.error ? r.data.error : `the server answered ${r.status}`)
+/**
+ * A command's options, checked before anything is sent: an option that does not exist (a typo would otherwise
+ * drop the text it carried without a word) and an option whose value was left out both stop here, with exit code 2.
+ */
+function checkOptions(command: string, takeValue: string[], switches: string[] = []) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (!FLAG.test(a)) continue
+    const name = a.slice(2)
+    if (switches.includes(name)) continue
+    if (!takeValue.includes(name)) fail(`t3bot ${command}: no option ${a}. \`t3bot help\` lists them.`)
+    if (args[i + 1] === undefined || FLAG.test(args[i + 1])) fail(`t3bot ${command}: ${a} needs a value.`)
+    i++
+  }
+}
+const KINDS = ['alarm', 'approve', 'do', 'know']
 async function probe(url: string, token?: string, ms = 2500): Promise<{ ok: boolean; status: number; data: any }> {
   try {
     const r = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(ms) })
@@ -186,21 +213,28 @@ function printQr(link: string) {
 // ---------- commands ----------
 
 async function notify() {
-  const title = opt('title')
-  if (!title) fail('t3bot notify needs --title')
+  checkOptions('notify', ['kind', 'title', 'body', 'agent', 'link', 'key', 'field', 'check', 'edit', 'edit-label', 'action'], ['face-id'])
+  const title = opt('title')?.trim()
+  if (!title) fail('t3bot notify needs --title "..."')
+  const kind = (opt('kind') ?? 'know').trim().toLowerCase()
+  if (!KINDS.includes(kind)) fail(`t3bot notify: --kind is ${KINDS.join(', ')} (not "${kind}").${kind === 'draft' ? ' For a draft, use `t3bot draft`.' : ''}`)
+  for (const f of [...optAll('field'), ...optAll('check'), ...optAll('action')]) {
+    if (!keyValue(f)[0].trim()) fail(`t3bot notify: "${f}" has no label. Write it as "Label=value".`)
+  }
   const r = await call('/v1/notify', {
-    kind: opt('kind') ?? 'know', title, body: opt('body'), agent: opt('agent'), link: opt('link'), key: opt('key'),
+    kind, title, body: opt('body'), agent: opt('agent'), link: opt('link'), key: opt('key'),
     fields: optAll('field').map(keyValue).map(([label, value]) => ({ label, value })),
     checks: optAll('check').map(keyValue).map(([label, state]) => ({ label, state: ['pass', 'fail', 'pending'].includes(state) ? state : 'pending' })),
     edit: opt('edit') !== undefined ? { label: opt('edit-label') ?? 'Text', text: opt('edit') } : undefined,
     actions: optAll('action').map(keyValue).map(([label, message]) => ({ label, message })),
     faceId: has('face-id'),
   })
-  if (r.status !== 200 || !r.data.ok) fail(`t3bot notify failed: ${JSON.stringify(r.data)}`)
+  if (r.status !== 200 || !r.data.ok) fail(`t3bot notify failed: ${refusal(r)}`, 1)
   say(JSON.stringify(r.data))
 }
 
 async function draft() {
+  checkOptions('draft', ['agent', 'to', 'text', 'via', 'subject', 'event', 'start', 'end', 'location', 'key'])
   const event = opt('event')
   const d: any = event
     ? { event, start: opt('start'), end: opt('end'), location: opt('location') }
@@ -208,7 +242,7 @@ async function draft() {
   if (event ? !d.start : !d.to || !d.text) fail(event ? 't3bot draft --event needs --start' : 't3bot draft needs --to and --text')
   const title = event ? `Add to your calendar: ${event}` : `Draft ${d.via === 'mail' ? 'mail' : 'message'} to ${d.to}`
   const r = await call('/v1/notify', { kind: 'draft', title, body: event ? `${d.start}${d.end ? ` to ${d.end}` : ''}` : d.text, agent: opt('agent'), key: opt('key'), draft: d })
-  if (r.status !== 200 || !r.data.ok) fail(`t3bot draft failed: ${JSON.stringify(r.data)}`)
+  if (r.status !== 200 || !r.data.ok) fail(`t3bot draft failed: ${refusal(r)}`, 1)
   say(JSON.stringify({ ...r.data, note: 'shown as a card in T3 Bot; the person sends it themselves' }))
 }
 
@@ -216,13 +250,13 @@ async function phone() {
   const what = args[0]
   if (what !== 'calendar' && what !== 'contacts') fail('t3bot phone calendar | t3bot phone contacts <name>')
   const r = what === 'contacts' ? await call(`/v1/phone/contacts?q=${encodeURIComponent(args.slice(1).join(' '))}`) : await call('/v1/phone/calendar')
-  if (r.status !== 200) fail(r.data.error ?? `failed (${r.status})`)
+  if (r.status !== 200) fail(refusal(r), 1)
   say(JSON.stringify(r.data, null, 1))
 }
 
 async function getJson(path: string) {
   const r = await call(path)
-  if (r.status !== 200) fail(r.data.error ?? `failed (${r.status})`)
+  if (r.status !== 200) fail(refusal(r), 1)
   return r.data
 }
 
@@ -307,15 +341,17 @@ async function demo() {
   if (!existsSync(script)) fail(`The demo server is missing (${tilde(script)}).`)
   const port = Number(opt('port')) || Number(process.env.T3BOT_DEMO_PORT) || 8810
   if ((await probe(`http://127.0.0.1:${port}/health`, undefined, 800)).ok) fail(`Something already answers on port ${port}. Pick another: t3bot demo --port ${port + 1}`)
-  const child = Bun.spawn([process.execPath, script, '--port', String(port), '--no-banner', ...(has('frozen') ? ['--frozen'] : []), ...(opt('host') ? ['--host', opt('host')!] : [])],
+  // This computer only unless --lan, --host or T3BOT_DEMO_HOST opens it: the demo's token is public.
+  const host = opt('host') ?? (has('lan') ? '0.0.0.0' : process.env.T3BOT_DEMO_HOST || '127.0.0.1')
+  const child = Bun.spawn([process.execPath, script, '--port', String(port), '--no-banner', ...(has('frozen') ? ['--frozen'] : []), '--host', host],
     { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' })
   const stop = () => { try { child.kill() } catch {} }
   process.on('SIGINT', stop); process.on('SIGTERM', stop)
   let up = false
   for (let i = 0; i < 40 && !up && child.exitCode === null; i++) { await Bun.sleep(250); up = (await probe(`http://127.0.0.1:${port}/health`, undefined, 500)).ok }
   if (!up) { stop(); fail(`The demo server did not start on port ${port}.`, 1) }
-  // Listening on this computer only (--host 127.0.0.1): a phone cannot reach it, so no Wi-Fi address is offered.
-  const local = /^(127\.|localhost$|::1$)/.test(opt('host') ?? '')
+  // Listening on this computer only (the default): a phone cannot reach it, so no Wi-Fi address is offered.
+  const local = /^(127\.|localhost$|::1$)/.test(host)
   const lan = local ? undefined : lanAddress()
   const url = (opt('url') ?? (lan ? `http://${lan}:${port}` : `http://127.0.0.1:${port}`)).replace(/\/+$/, '')
   const link = pairingLink(url, 'demo')
@@ -327,7 +363,8 @@ async function demo() {
   say()
   if (!has('no-qr')) { printQr(link); say() }
   say(lan ? `${has('no-qr') ? 'Open the link on' : 'Scan the code with'} an iPhone on the same Wi-Fi${has('no-qr') ? '' : ', or open the link on it'}. Stop with Ctrl C.`
-    : `${local ? 'It listens on this computer only' : 'This computer has no network address'}, so the link only works on this Mac (the iOS Simulator). Stop with Ctrl C.`)
+    : `${local ? 'It listens on this computer only' : 'This computer has no network address'}, so the link only works on this Mac (the iOS Simulator). ${local ? 'For an iPhone on the same Wi-Fi, start it with --lan. ' : ''}Stop with Ctrl C.`)
+  if (!local) say('It is open to your network over plain http with the public token "demo": use it on a network you trust.')
   process.exit(await child.exited)
 }
 

@@ -11,7 +11,7 @@ import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 
 /** Server and CLI version, as `/v1/hello` reports it. */
-export const VERSION = '0.2.0'
+export const VERSION = '0.3.0'
 
 export const HOME = process.env.HOME || homedir()
 export const ROOT = resolve(import.meta.dir, '..')
@@ -154,7 +154,8 @@ export function loadConfig(warn: (m: string, x?: unknown) => void = () => {}): C
 export function saveConfig(next: Config) {
   const path = configPath()
   mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.tmp`
+  // A name of its own: the server and `t3bot setup` can save at the same moment without writing into each other's file.
+  const tmp = `${path}.${process.pid}.tmp`
   writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n')
   renameSync(tmp, path)
   cachedMtime = -1

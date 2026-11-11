@@ -13,6 +13,7 @@ struct AgentView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Drawn from the store at once (memory or the disk cache); the network only updates it.
     private var tl: Timeline? { store.timelines[agentId] }
     @State private var draft = ""
@@ -66,7 +67,8 @@ struct AgentView: View {
 
     private static let move = Animation.spring(response: 0.55, dampingFraction: 0.8)
     private static let smallFace: CGFloat = 40
-    private static let bigFace: CGFloat = 68
+    // The size of a group's working faces: twice the header's read as a different bot.
+    private static let bigFace: CGFloat = 48
     private static let space = "agentchat"
     private static let workingId = "working"
 
@@ -78,7 +80,8 @@ struct AgentView: View {
         guard let out = store.outgoing[agentId] else { return nil }
         var recent = (tl?.entries ?? [])[...]
         if let mark = sentAfter, let i = recent.lastIndex(where: { $0.id == mark }) { recent = recent[(i + 1)...] }
-        let landed = recent.suffix(8).contains { $0.type == "me" && $0.text == out }
+        let withPhotos = !(store.outgoingImages[agentId] ?? []).isEmpty
+        let landed = recent.suffix(8).contains { $0.type == "me" && $0.text == out && (!withPhotos || !($0.images ?? []).isEmpty) }
         return landed ? nil : out
     }
 
@@ -124,9 +127,9 @@ struct AgentView: View {
                         composer
                     }
                 }
-                // At the largest text sizes the title is several lines tall: a firm edge keeps the messages
-                // from showing through it.
-                .scrollEdgeEffectStyle(typeSize.isAccessibilitySize ? .hard : .automatic, for: .top)
+                // No edge effect at the top: the bar itself is opaque, with a hairline under it (a soft edge let text
+                // show through, a hard one sliced it).
+                .scrollEdgeEffectHidden(true, for: .top)
             faceLayer
         }
         .coordinateSpace(.named(Self.space))
@@ -167,6 +170,11 @@ struct AgentView: View {
             guard old != nil, let last = tl?.entries.last, last.type == "agent", tl?.working != true else { return }
             store.endLive(agentId, text: last.text)
             Haptics.soft()
+            // VoiceOver says the answer as it lands (nothing is posted when it is off).
+            if UIAccessibility.isVoiceOverRunning {
+                let said = Markdown.plain(EntryView.withoutImageLines(last.text)).prefix(400)
+                AccessibilityNotification.Announcement("\(bot?.name ?? "Bot"): \(said)").post()
+            }
             faceFlash = .success
             Task { try? await Task.sleep(for: .seconds(2.5)); if faceFlash == .success { faceFlash = nil } }
         }
@@ -197,6 +205,20 @@ struct AgentView: View {
             if store.debugSheet == "edit-\(agentId)" { store.debugSheet = nil; editing = bot }
             #endif
         }
+        #if DEBUG
+        // Screen checks: the edit sheet asked for by a debug link, whenever it arrives (not only after the first load).
+        .onChange(of: store.debugSheet) { _, w in
+            if w == "edit-\(agentId)" { store.debugSheet = nil; editing = bot }
+        }
+        .onAppear {
+            if store.debugSheet == "edit-\(agentId)" {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(600))
+                    if store.debugSheet == "edit-\(agentId)" { store.debugSheet = nil; editing = bot }
+                }
+            }
+        }
+        #endif
         .onChange(of: tl == nil) { _, missing in if !missing { loadFailed = false } }
         .onChange(of: store.doneLocally) { old, new in
             // An answer that did not go through brings its card back (the store undoes it and says why):
@@ -253,13 +275,16 @@ struct AgentView: View {
     private var faceLayer: some View {
         if let bot, !isGroup, headerSlot.width > 0 {
             let inView = faceInChat && chatSlot != nil && !parked
-            let r = inView ? chatSlot! : headerSlot
+            let r = (inView ? chatSlot : nil) ?? headerSlot
             // Drawn at the chat size and scaled down in the top bar, so it stays sharp; it grows as it lands.
-            LiveFace(face: bot.face, size: Self.bigFace, state: faceState)
+            // Held expressions here too: in a still, the looping ones (one eye, no eyes) looked broken; the dots
+            // beside it say it is working.
+            LiveFace(face: bot.face, size: Self.bigFace, state: faceState, calm: true)
                 .frame(width: Self.bigFace, height: Self.bigFace)
                 .scaleEffect(inView ? 1 : Self.smallFace / Self.bigFace)
                 .position(x: r.midX, y: r.midY)
-                .animation(instantFace ? nil : Self.move, value: inView)
+                // Reduce Motion: the face changes place without the drop and the climb.
+                .animation(instantFace || reduceMotion ? nil : Self.move, value: inView)
                 .allowsHitTesting(false)
         }
     }
@@ -269,6 +294,10 @@ struct AgentView: View {
             header
             needsBar
         }
+        // An opaque bar with a hairline under it, like a classic navigation bar: messages pass cleanly behind it
+        // (a fade, or a hard scroll edge, left half-visible lines that read as broken).
+        .background(Color(.systemBackground).ignoresSafeArea(edges: .top))
+        .overlay(alignment: .bottom) { Divider() }
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { topEdge = $0 }
     }
 
@@ -285,12 +314,15 @@ struct AgentView: View {
                             // A sent message is already on screen (the pending bubble): it swaps in place.
                             .transition(e.type == "me" ? AnyTransition.identity
                                         : .asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
+                        case let .reply(e, autos): EntryView(entry: e, group: isGroup ? bot?.members ?? [] : [], autos: autos)
                         case let .automatic(list): AutomaticGroup(entries: list)
                         case let .day(label): DaySeparator(label: label)
                         }
                     }
                     if let out = outgoing {
-                        EntryView(entry: Entry(id: "pending", type: "me", text: out, at: "", steps: [], working: nil))
+                        // The photos being sent show at once, from this phone, instead of "[1 photo]".
+                        let photos = (store.outgoingImages[agentId] ?? []).map { EntryImage(path: "local:\($0)", alt: "") }
+                        EntryView(entry: Entry(id: "pending", type: "me", text: out, at: "", steps: [], working: nil, images: photos.isEmpty ? nil : photos))
                             .opacity(0.75)
                             .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .identity))
                     }
@@ -317,7 +349,12 @@ struct AgentView: View {
                             HStack { Spacer(); ProgressView(); Spacer() }.padding(.top, 40)
                         }
                     }
-                    if let tl, tl.entries.isEmpty, outgoing == nil, store.failed[agentId] == nil, !workingNow { welcome(tl.agent) }
+                    if let tl, tl.agent.threadMissing == true {
+                        // The bot's thread was deleted in T3 Code: said once, plainly, instead of an empty chat.
+                        Text("\(tl.agent.name)'s thread no longer exists in T3 Code. Hide this bot, or make a new one.")
+                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity).padding(.top, 40)
+                    } else if let tl, tl.entries.isEmpty, outgoing == nil, store.failed[agentId] == nil, !workingNow { welcome(tl.agent) }
                     Color.clear.frame(height: 1).id("bottom")
                         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { bottomEdge = $0 }
                 }
@@ -329,7 +366,9 @@ struct AgentView: View {
             .scrollDismissesKeyboard(.interactively)
             // Like Messages: the chat opens at its last message and stays pinned to the bottom when the keyboard
             // (or anything else) changes the space it has.
-            .defaultScrollAnchor(.bottom)
+            // A long chat opens on its end; a short one sits under the header (at the foot it left an empty band).
+            .defaultScrollAnchor(.top, for: .alignment)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
             .onChange(of: tl?.entries.last?.id) { old, _ in
                 // First load: jump. Later messages glide in, unless the chat is scrolled up for reading (then it stays
@@ -424,15 +463,30 @@ struct AgentView: View {
             if isGroup {
                 AvatarView(agent: agentId, size: 40)
             } else {
-                Color.clear.frame(width: 40, height: 40)
-                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { headerSlot = $0 }
+                // While the live face works down in the chat, its still picture keeps the bar's place: the top bar
+                // always says whose chat this is.
+                ZStack {
+                    if let bot, faceInChat, chatSlot != nil, !parked {
+                        StoredImage(key: "skin:\(bot.face.skin)", path: "skin:\(bot.face.skin)") { Color.clear }
+                            .padding(3)
+                            .transition(.opacity)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .frame(width: 40, height: 40)
+                .animation(Self.move, value: faceInChat && chatSlot != nil && !parked)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { headerSlot = $0 }
             }
             // Tap the name for the bot's details (like a contact in Messages).
             Button { editing = bot } label: {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(bot?.name ?? "").font(.headline).foregroundStyle(.primary).lineLimit(1)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        .contentTransition(.opacity)
+                    HStack(spacing: 4) {
+                        // At work: a live dot before what it is doing; idle: its role, plain.
+                        if faceInChat { Circle().fill(Color.green).frame(width: 6, height: 6) }
+                        Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            .contentTransition(.opacity)
+                    }
                 }
                 .contentShape(Rectangle())
             }
@@ -446,7 +500,7 @@ struct AgentView: View {
                 if let link = bot?.t3Link, let url = URL(string: link) {
                     Button { openURL(url) } label: { Label("Open in T3 Code", systemImage: "arrow.up.right.square") }
                 }
-                Button { Haptics.tap(); Task { await load() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                Button { Haptics.tap(); Task { await refreshByHand() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
             } label: {
                 Image(systemName: "ellipsis").font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(.primary)
@@ -467,7 +521,14 @@ struct AgentView: View {
     private var subtitle: String {
         if faceInChat { return bot?.activityText ?? "Working" }
         if !store.online { return "Not connected" }
-        return bot?.role ?? ""
+        return Self.shortRole(bot?.role ?? "")
+    }
+
+    /// The role's first clause ("Owns the marketing site"), so the top bar never ends in "…".
+    static func shortRole(_ role: String) -> String {
+        let cut = role.firstIndex { ",;:(".contains($0) } ?? role.endIndex
+        let head = role[..<cut].replacingOccurrences(of: " - ", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        return head.isEmpty ? role : head
     }
 
     /// The replies the server sends for the bot's last message: the bot's own, else the ones saved in
@@ -480,28 +541,36 @@ struct AgentView: View {
 
     /// One-tap answers under the bot's last message.
     private func quickReplies(_ list: [String]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            GlassEffectContainer(spacing: 8) {
-                HStack(spacing: 8) {
-                    ForEach(list, id: \.self) { r in
-                        Button {
-                            faceFlash = .affirm
-                            Task { try? await Task.sleep(for: .seconds(1.2)); if faceFlash == .affirm { faceFlash = nil } }
-                            repliedTo = tl?.entries.last?.id
-                            post(r) { repliedTo = nil }
-                        } label: {
-                            Text(r).font(.subheadline.weight(.medium))
-                                .padding(.horizontal, 14).padding(.vertical, 8)
-                                .glassEffect(.regular.interactive(), in: .capsule)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.vertical, 2)
+        // One quiet row of whole suggestions: as many as fit, never one cut mid-word.
+        ViewThatFits(in: .horizontal) {
+            ForEach((1...max(list.count, 1)).reversed(), id: \.self) { n in
+                HStack(spacing: 8) { ForEach(Array(list.prefix(n)), id: \.self) { chip($0) } }
+                    .fixedSize()
             }
         }
-        .scrollClipDisabled()
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private func chip(_ r: String) -> some View {
+        Button {
+            faceFlash = .affirm
+            Task { try? await Task.sleep(for: .seconds(1.2)); if faceFlash == .affirm { faceFlash = nil } }
+            repliedTo = tl?.entries.last?.id
+            post(r) { repliedTo = nil }
+        } label: {
+            Text(r).font(.subheadline).lineLimit(1)
+                .padding(.horizontal, 13).padding(.vertical, 7)
+                .background(Capsule().fill(Color(.tertiarySystemFill)))
+                .foregroundStyle(.primary)
+                // 44 points to the finger; the room is taken back from the layout, so nothing moves.
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+                .padding(.vertical, -5)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Sends this reply")
     }
 
     /// Where the face sits while the bot works; a group shows each member instead.
@@ -514,25 +583,29 @@ struct AgentView: View {
                 Color.clear.frame(width: Self.bigFace, height: Self.bigFace)
                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { chatSlot = $0 }
                     .onDisappear { chatSlot = nil }
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(outgoing != nil && tl?.working != true ? "Sending" : bot?.activityText ?? "Working")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                            .contentTransition(.opacity)
-                            .animation(.easeInOut(duration: 0.2), value: bot?.activity)
-                        ChatTypingDots()
-                    }
-                    // What it last said it was doing, on one quiet line (the row keeps its height: the face is taller).
-                    if let step = lastStep {
-                        Text(step).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
-                            .contentTransition(.opacity)
-                            .animation(.easeInOut(duration: 0.2), value: step)
-                    }
+                // The top bar already says what it is doing ("Running a command"): here, what it last said it was
+                // doing, else that same word once, beside the dots.
+                HStack(spacing: 6) {
+                    ChatTypingDots()
+                    // The header already says "Working": here only what it last said it was doing, else just the dots.
+                    Text(lastStep ?? (outgoing != nil && tl?.working != true ? "Sending" : ""))
+                        .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                        .contentTransition(.opacity)
+                        .animation(.easeInOut(duration: 0.2), value: lastStep ?? bot?.activity ?? "")
                 }
             }
             .padding(.vertical, 2)
-            .accessibilityElement(children: .combine)
+            // One spoken line: who works and on what (the dots and an empty text said nothing).
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(workingSpoken)
         }
+    }
+
+    /// The working line, as VoiceOver says it.
+    private var workingSpoken: String {
+        let name = bot?.name ?? "The bot"
+        if let step = lastStep { return "\(name) is working. \(step)" }
+        return outgoing != nil && tl?.working != true ? "Sending to \(name)" : "\(name) is working"
     }
 
     /// The first line of the bot's latest note to itself while it works on the answer.
@@ -562,7 +635,7 @@ struct AgentView: View {
                 ForEach(members) { m in
                     let on = m.mood == "working"
                     let done = !on && answered.contains(m.id)
-                    LiveFace(face: m.face, size: 48, state: on ? Self.working(m) : .idle)
+                    LiveFace(face: m.face, size: 48, state: on ? Self.working(m) : .idle, calm: true)
                         .frame(width: 48, height: 48)
                         .overlay(alignment: .bottomTrailing) {
                             if done {
@@ -597,17 +670,20 @@ struct AgentView: View {
         switch names.count {
         case 0: return anyDone ? "Putting the answers together" : "Asking the group"
         case 1: return "\(names[0]) is typing"
-        default: return names.dropLast().joined(separator: ", ") + " and \(names.last!) are typing"
+        default: return names.dropLast().joined(separator: ", ") + " and \(names.last ?? "") are typing"
         }
     }
 
     enum Item: Identifiable {
         case entry(Entry)
+        /// A bot's reply with the automatic updates that followed it, said on its own quiet line.
+        case reply(Entry, [Entry])
         case automatic([Entry])
         case day(String)
         var id: String {
             switch self {
             case let .entry(e): return e.id
+            case let .reply(e, _): return e.id
             case let .automatic(l): return "auto-" + (l.first?.id ?? "")
             case let .day(label): return "day-" + label
             }
@@ -625,16 +701,26 @@ struct AgentView: View {
             let label = DaySeparator.label(d)
             if label != lastDay { out.append(.day(label)); lastDay = label }
         }
-        for e in entries {
-            if e.isAutomatic {
-                if run.isEmpty { mark(e) }
-                run.append(e); continue
+        // Right after a finished reply, the run joins that reply's line (time · steps · automatic updates);
+        // anywhere else it keeps a line of its own.
+        func close() {
+            guard !run.isEmpty else { return }
+            if case let .entry(last)? = out.last, last.type == "agent", last.working != true,
+               Ago.date(run[0].at).map(DaySeparator.label) == lastDay {
+                out[out.count - 1] = .reply(last, run)
+            } else {
+                if let first = run.first { mark(first) }
+                out.append(.automatic(run))
             }
-            if !run.isEmpty { out.append(.automatic(run)); run = [] }
+            run = []
+        }
+        for e in entries {
+            if e.isAutomatic { run.append(e); continue }
+            close()
             mark(e)
             out.append(.entry(e))
         }
-        if !run.isEmpty { out.append(.automatic(run)) }
+        close()
         return out
     }
 
@@ -655,13 +741,12 @@ struct AgentView: View {
     /// A message that did not leave: marked, tap to send it again. A long press also offers to change it
     /// (back in the composer, photos included) or to drop it.
     private func failedBubble(_ f: Store.FailedSend) -> some View {
-        let photos = "[\(f.images.count) photo\(f.images.count == 1 ? "" : "s")]"
-        let shown = f.images.isEmpty ? f.text : [f.text, photos].filter { !$0.isEmpty }.joined(separator: "\n")
+        let photos = f.imageIds.map { EntryImage(path: "local:\($0)", alt: "") }
         return Button {
             retry(f)
         } label: {
             VStack(alignment: .trailing, spacing: 4) {
-                EntryView(entry: Entry(id: "failed", type: "me", text: shown, at: "", steps: [], working: nil), menu: false)
+                EntryView(entry: Entry(id: "failed", type: "me", text: f.text, at: "", steps: [], working: nil, images: photos.isEmpty ? nil : photos), menu: false)
                     .opacity(0.6)
                 Label("Not sent. Tap to try again", systemImage: "exclamationmark.circle.fill")
                     .font(.caption.weight(.medium)).foregroundStyle(.red)
@@ -684,7 +769,9 @@ struct AgentView: View {
 
     private func retry(_ f: Store.FailedSend) {
         store.failed[agentId] = nil
-        post(f.text, images: f.images)
+        sentAfter = tl?.entries.last(where: { $0.type == "me" })?.id ?? ""
+        // The same id as the first try: if that one did reach the bot, it is not posted a second time.
+        store.send(f.text, to: agentId, images: f.images, clientId: f.clientId)
     }
 
     /// Back in the composer to be changed: the text (after anything already typed) and the photos.
@@ -718,34 +805,60 @@ struct AgentView: View {
     private var needsBar: some View {
         let needs = botNeeds
         if let top = needs.first {
-            Button { showNeeds = true } label: {
-                HStack(spacing: 8) {
-                    // Inside the glass a chip filled with the label colour came out washed (a pale chip with a
-                    // white number in light, a dark one with a black number in dark). The number takes the
-                    // label colour, which reads on glass like the title beside it, over a quiet fill.
-                    Text("\(needs.count)")
-                        .font(.caption.weight(.bold)).monospacedDigit()
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(Capsule().fill(Color(.tertiarySystemFill)))
-                        .foregroundStyle(.primary)
-                    if top.rank <= 1 { Circle().fill(top.rank == 0 ? Color.orange : Color.red).frame(width: 6, height: 6) }
-                    Text(top.title).font(.subheadline).lineLimit(1).foregroundStyle(.primary)
-                    Spacer(minLength: 4)
-                    Image(systemName: "chevron.up").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button { showNeeds = true } label: {
+                    HStack(spacing: 8) {
+                        // What it waits on you for, in the same word as on home (an approval's button says it).
+                        if !top.isApproval { KindTag(card: top) }
+                        Text(top.title).font(.subheadline.weight(.medium)).lineLimit(2).foregroundStyle(.primary)
+                        Spacer(minLength: 4)
+                        if needs.count > 1 {
+                            Text("+\(needs.count - 1) more").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                        if !top.isApproval {
+                            Image(systemName: "chevron.up").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 12).padding(.vertical, 10)
-                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 16))
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(needs.count) need\(needs.count == 1 ? "s" : "") you. \(top.title)")
+                .accessibilityHint("Opens the list")
+                // An approval opens its sheet (the command, Approve and Decline): one tap must never deploy
+                // something without its context.
+                if top.isApproval {
+                    Button {
+                        Haptics.tap()
+                        store.selectedCard = top
+                    } label: {
+                        Text("Approve").font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(Capsule().fill(Color.primary))
+                            .foregroundStyle(Color(.systemBackground))
+                            .padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                            .padding(.vertical, -6)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens the request, with Approve and Decline")
+                }
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            // A plain filled card: on glass, the black Approve button washed out to grey and read as disabled.
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemBackground)))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color(.separator).opacity(0.6), lineWidth: 0.5))
             .padding(.horizontal, 12).padding(.bottom, 8)
-            .accessibilityLabel("\(needs.count) need\(needs.count == 1 ? "s" : "") you. \(top.title)")
-            .accessibilityHint("Opens the list")
         }
     }
 
     private func load() async {
         await store.loadTimeline(agentId)
+    }
+
+    /// Refresh from the menu: says so when it did not work, instead of nothing happening.
+    private func refreshByHand() async {
+        await load()
+        if let why = store.chatProblem[agentId] { store.flash("Not refreshed: \(why)", failed: true) }
     }
 
     private func runsBlock(_ runs: [RunInfo]) -> some View {
@@ -797,7 +910,10 @@ struct AgentView: View {
                             Button { remove(a) } label: {
                                 Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.6))
                                     .frame(width: 28, height: 28)
+                                    // 44 points to the finger, 28 on screen.
+                                    .padding(8)
                                     .contentShape(Rectangle())
+                                    .padding(-8)
                             }
                             .buttonStyle(.plain)
                             .offset(x: 8, y: -8)
@@ -817,6 +933,9 @@ struct AgentView: View {
                     .foregroundStyle(.primary)
                     .frame(width: 40, height: 40)
                     .glassEffect(.regular.interactive(), in: .circle)
+                    .padding(2)
+                    .contentShape(Rectangle())
+                    .padding(-2)
             }
             .tint(.primary)
             .disabled(restored >= 4)
@@ -837,7 +956,10 @@ struct AgentView: View {
                             .background(Circle().fill(Color(.label)))
                             // The room around the circle belongs to the button: 40 pt to press, not 32.
                             .padding(4)
+                            // And 2 more that the layout does not see: 44 in all.
+                            .padding(2)
                             .contentShape(Rectangle())
+                            .padding(-2)
                     }
                     .buttonStyle(.plain)
                     .transition(.scale(scale: 0.4).combined(with: .opacity))
@@ -870,10 +992,16 @@ struct AgentView: View {
             Task {
                 var jpg: Data?
                 var thumb: UIImage?
-                if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
-                    let scaled = img.scaledForUpload()
-                    jpg = scaled.jpegData(compressionQuality: 0.8)
-                    thumb = ChatAttachment.thumbnail(scaled)
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    // Decoding, scaling and encoding a 12 MP photo takes a moment: off the main thread, so the
+                    // chat keeps scrolling and typing while the photo loads.
+                    let made = await Task.detached(priority: .userInitiated) { () -> (Data?, UIImage?) in
+                        guard let img = UIImage(data: data) else { return (nil, nil) }
+                        let scaled = img.scaledForUpload()
+                        return (scaled.jpegData(compressionQuality: 0.8), ChatAttachment.thumbnail(scaled))
+                    }.value
+                    jpg = made.0
+                    thumb = made.1
                 }
                 // Removed, or the message sent, while it loaded: nothing to fill in.
                 guard let i = attachments.firstIndex(where: { $0.id == new.id }) else { return }
@@ -906,6 +1034,18 @@ struct AgentView: View {
         attachments = []
         picked = []
         draft = ""
+        store.saveDraft("", for: agentId)
+        // Cleared while iOS had an autocorrection pending (the suggestion bar was up), the field gets its text back a
+        // moment later: it then looked unsent and a second tap posted it twice. Cleared again when that happens.
+        let sentDraft = text
+        for delay in [0.05, 0.3] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if !sentDraft.isEmpty, draft.trimmingCharacters(in: .whitespacesAndNewlines) == sentDraft {
+                    draft = ""
+                    store.saveDraft("", for: agentId)
+                }
+            }
+        }
         faceFlash = .affirm
         Task { try? await Task.sleep(for: .seconds(1.2)); if faceFlash == .affirm { faceFlash = nil } }
         post(text, images: images)
@@ -917,7 +1057,10 @@ struct EntryView: View {
     var group: [String] = []
     /// The long-press menu (Copy, Share, Select Text). Off for a bubble that has its own menu.
     var menu = true
+    /// Automatic updates that came after this reply, folded into its line.
+    var autos: [Entry] = []
     @State private var showSteps = false
+    @State private var showAutos = false
     @EnvironmentObject var store: Store
     @Environment(\.colorScheme) private var scheme
 
@@ -939,6 +1082,8 @@ struct EntryView: View {
                     .tint(Color(.systemBackground))
                     .contentShape(.contextMenuPreview, shape)
                     .chatMessageMenu(mine, on: menu)
+                    // Whose words these are: the side of the screen says it to the eye only.
+                    .accessibilityLabel { label in Text("You said"); label }
             }
             }
             }
@@ -979,7 +1124,7 @@ struct EntryView: View {
                             withAnimation { showSteps.toggle() }
                         } label: {
                             HStack(spacing: 3) {
-                                Text("\(entry.steps.count) step\(entry.steps.count == 1 ? "" : "s")")
+                                Text(entry.steps.count == 1 ? "Worked in 1 step" : "Worked in \(entry.steps.count) steps")
                                 Image(systemName: showSteps ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold))
                             }
                             .font(.caption2).foregroundStyle(.secondary)
@@ -992,8 +1137,26 @@ struct EntryView: View {
                         .accessibilityLabel("\(entry.steps.count) step\(entry.steps.count == 1 ? "" : "s")")
                         .accessibilityHint(showSteps ? "Hides what the bot did on the way" : "Shows what the bot did on the way")
                     }
+                    if !autos.isEmpty {
+                        let n = max(1, autos.filter { $0.type == "auto" }.count)
+                        Button {
+                            withAnimation { showAutos.toggle() }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text(n == 1 ? "1 automatic update" : "\(n) automatic updates")
+                                Image(systemName: showAutos ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold))
+                            }
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .padding(.vertical, 10).padding(.horizontal, 6)
+                            .contentShape(Rectangle())
+                            .padding(.vertical, -10).padding(.horizontal, -6)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(n) automatic update\(n == 1 ? "" : "s") since")
+                    }
                 }
                 .padding(.leading, group.isEmpty ? 6 : 46)
+                if showAutos { AutomaticGroup.list(autos).padding(.leading, group.isEmpty ? 6 : 46).transition(.opacity) }
                 if showSteps {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(entry.steps.enumerated()), id: \.offset) { _, s in
@@ -1103,6 +1266,7 @@ struct DaySeparator: View {
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity)
             .padding(.top, 6)
+            .accessibilityAddTraits(.isHeader)
     }
 
     static func label(_ d: Date) -> String {
@@ -1170,11 +1334,16 @@ struct BotNeedsSheet: View {
 extension UIImage {
     /// At most 1600 px on the long side, so a photo uploads fast on any connection.
     func scaledForUpload() -> UIImage {
-        let longest = max(size.width, size.height)
+        // Counted in pixels (a screenshot's size is in points, at 2 or 3 pixels each).
+        let w = size.width * scale, h = size.height * scale
+        let longest = max(w, h)
         guard longest > 1600 else { return self }
         let k = 1600 / longest
-        let target = CGSize(width: size.width * k, height: size.height * k)
-        return UIGraphicsImageRenderer(size: target).image { _ in draw(in: CGRect(origin: .zero, size: target)) }
+        let target = CGSize(width: w * k, height: h * k)
+        // One pixel per point: the default format draws at the screen's scale, which made 4800 px of the 1600.
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: target, format: format).image { _ in draw(in: CGRect(origin: .zero, size: target)) }
     }
 }
 
@@ -1188,33 +1357,43 @@ struct AutomaticGroup: View {
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) { open.toggle() }
             } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "gearshape.2").font(.caption)
+                // As quiet as the time under a message: it is there to be found, not to be read.
+                HStack(spacing: 3) {
                     Text("\(updates) automatic update\(updates == 1 ? "" : "s")")
-                    if let last = entries.last { Text("· \(Ago.short(last.at))").foregroundStyle(.tertiary) }
-                    Image(systemName: open ? "chevron.up" : "chevron.down").font(.caption2)
+                    if let last = entries.last { Text("· \(Ago.short(last.at))") }
+                    Image(systemName: open ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold))
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+                .padding(.vertical, -8)
             }
             .buttonStyle(.plain)
-            if open {
-                ForEach(entries) { e in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(e.type == "auto" ? "Sent to the bot" : "Its answer").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
-                        Text(Markdown.render(e.text)).font(.caption).foregroundStyle(.secondary).lineLimit(12)
-                    }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground).opacity(0.6)))
-                }
-            }
+            .accessibilityHint(open ? "Hides them" : "Shows what automations sent and what the bot answered")
+            if open { Self.list(entries) }
         }
         .padding(.vertical, 2)
     }
 
     private var updates: Int { max(1, entries.filter { $0.type == "auto" }.count) }
+
+    /// What the automations sent and what the bot answered them, opened from a line.
+    static func list(_ entries: [Entry]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(entries) { e in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(e.type == "auto" ? "Sent to the bot" : "Its answer").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                    Text(Markdown.render(e.text)).font(.caption).foregroundStyle(.secondary).lineLimit(12)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground).opacity(0.6)))
+            }
+        }
+    }
 }
 
 // MARK: - Images in messages (screenshots from bots, photos sent from the phone)
@@ -1226,6 +1405,13 @@ final class ImageLoader: ObservableObject {
     @Published var failed = false
 
     func load(_ path: String) async {
+        // A picture T3 Code keeps (direct mode): ImageStore asks T3 Code for a short-lived link.
+        if path.hasPrefix("t3media:") || path.hasPrefix("t3attachment:") {
+            if let img = await ImageStore.shared.load("file:" + path, path: path) { image = img } else { failed = true }
+            return
+        }
+        // A photo still on its way: the bytes on this phone.
+        if path.hasPrefix("local:"), let img = Outgoing.image(String(path.dropFirst(6))) { image = img; return }
         // "+" and "&" are allowed in a query but mean a space and the next field to the server: a path holding
         // one came back as "not an image".
         var allowed = CharacterSet.urlQueryAllowed
@@ -1246,7 +1432,7 @@ struct ChatImage: View {
         Group {
             if let img = loader.image {
                 Image(uiImage: img).resizable().scaledToFit()
-                    .frame(maxWidth: 280, maxHeight: 360)
+                    .frame(maxWidth: 360, maxHeight: 440)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color(.separator), lineWidth: 0.5))
                     .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 14))
@@ -1311,6 +1497,7 @@ struct ImageViewer: View {
         NavigationStack {
             GeometryReader { _ in
                 Image(uiImage: image).resizable().scaledToFit()
+                    .accessibilityLabel(title.isEmpty ? "Image" : title)
                     .scaleEffect(scale)
                     .offset(offset)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1334,6 +1521,35 @@ struct ImageViewer: View {
             .toolbarBackground(.visible, for: .navigationBar)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+/// Lays its views out in rows, left to right, starting a new row when the next one does not fit.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, row: CGFloat = 0, widest: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > 0, x + s.width > width { y += row + spacing; x = 0; row = 0 }
+            x += (x > 0 ? spacing : 0) + s.width
+            row = max(row, s.height)
+            widest = max(widest, x)
+        }
+        return CGSize(width: min(widest, width), height: y + row)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, row: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + s.width > bounds.maxX { y += row + spacing; x = bounds.minX; row = 0 }
+            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+            x += s.width + spacing
+            row = max(row, s.height)
         }
     }
 }

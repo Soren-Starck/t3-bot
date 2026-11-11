@@ -9,6 +9,9 @@ struct HomeView: View {
     @State private var ask = ""
     @State private var showNew = false
     @State private var query = ""
+    /// The search field is open (from the magnifier in the top bar).
+    @State private var searchOn = false
+    @FocusState private var searchFocus: Bool
     @State private var showSettings = false
     /// A bot's own list of what needs you, opened from its row's menu.
     @State private var needsOf: String?
@@ -19,6 +22,9 @@ struct HomeView: View {
     /// The search and what it found. Held here so one task on the list asks the server, not one per row.
     @StateObject private var search = SearchModel()
     @Environment(\.dynamicTypeSize) private var typeSize
+    /// The room a name gets under its face in the strip: 60 points at the default text size, more as the text
+    /// grows, so a name is not cut to two letters at the largest sizes.
+    @ScaledMetric(relativeTo: .caption2) private var rosterName: CGFloat = 60
     @FocusState private var asking: Bool
 
     var body: some View {
@@ -46,9 +52,22 @@ struct HomeView: View {
                     }
                     if let chief = lead {
                         Section {
-                            NavigationLink(value: Route.agent(chief.id)) { AgentRow(agent: chief, prominent: true) }
-                                .botMenu(chief, needsOf: $needsOf)
-                            askField(chief)
+                            if chiefHasNews(chief) {
+                                // An unread reply or something it asks: its full row, then the field.
+                                NavigationLink(value: Route.agent(chief.id)) { AgentRow(agent: chief) }
+                                    .navigationLinkIndicatorVisibility(.hidden)
+                                    .botMenu(chief, needsOf: $needsOf)
+                                askField(chief)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 2, leading: 14, bottom: 12, trailing: 14))
+                            } else {
+                                // Every bot, one tap away: the lead first, the hidden ones last and faded.
+                                roster(chief)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 10, leading: 0, bottom: 4, trailing: 0))
+                                askField(chief)
+                                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 12, trailing: 12))
+                            }
                         } footer: {
                             if onlyLead { Text("This is your only bot. Tap + to add one for a project, or a group chat.") }
                         }
@@ -58,49 +77,44 @@ struct HomeView: View {
                         Section {
                             ForEach(group.bots) { a in
                                 NavigationLink(value: Route.agent(a.id)) { AgentRow(agent: a) }
+                                    .navigationLinkIndicatorVisibility(.hidden)
                                     .botMenu(a, needsOf: $needsOf)
                                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                             }
                         } header: {
-                            ShelfHeader(shelf: group.shelf, count: group.bots.count)
-                        }
-                    }
-                    if let hidden = store.home?.agents.filter(\.hidden), !hidden.isEmpty {
-                        Section {
-                            // A row of its own, not a DisclosureGroup: that one indents its rows and draws a heavier
-                            // chevron than the rest of the list.
-                            Button {
-                                withAnimation(.spring(duration: 0.3)) { showHidden.toggle() }
-                            } label: {
-                                HStack {
-                                    Text("Hidden bots · \(hidden.count)").foregroundStyle(Color.primary)
-                                    Spacer(minLength: 4)
-                                    Image(systemName: "chevron.right")
-                                        .font(.footnote.weight(.semibold))
-                                        .foregroundStyle(Color(.tertiaryLabel))
-                                        .rotationEffect(.degrees(showHidden ? 90 : 0))
-                                        .accessibilityHidden(true)
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .accessibilityLabel("Hidden bots · \(hidden.count)")
-                            .accessibilityValue(showHidden ? "Open" : "Closed")
-                            if showHidden {
-                                ForEach(hidden) { a in
-                                    NavigationLink(value: Route.agent(a.id)) { AgentRow(agent: a) }
-                                        .botMenu(a, needsOf: $needsOf)
-                                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                            if group.shelf != .idle {
+                                ShelfHeader(shelf: group.shelf, review: group.shelf == .needsYou ? store.needs.count : 0) {
+                                    Haptics.tap(); store.showReview = true
                                 }
                             }
                         }
                     }
+                    // What is done and what is hidden: one quiet line under the list, not two more cards.
                     if let home = store.home, !home.agents.isEmpty {
-                        Section {
-                            NavigationLink(value: Route.know) {
-                                HStack {
-                                    Label("Done without you today", systemImage: "checkmark.seal")
-                                    Spacer()
-                                    Text("\(home.doneToday)").foregroundStyle(home.doneToday > 0 ? Color.green : Color.secondary).monospacedDigit().contentTransition(.numericText())
+                        let hidden = home.agents.filter(\.hidden)
+                        if home.doneToday > 0 {
+                            // Two quiet rows in one card: what got done, and the bots kept out of sight.
+                            Section {
+                                if home.doneToday > 0 {
+                                    NavigationLink(value: Route.know) {
+                                        HStack {
+                                            Label("Done without you today", systemImage: "checkmark.circle.fill")
+                                                .symbolRenderingMode(.multicolor)
+                                            Spacer()
+                                            Text("\(home.doneToday)").foregroundStyle(.secondary).monospacedDigit()
+                                                .contentTransition(.numericText())
+                                        }
+                                    }
+                                }
+                            }
+                            .font(.subheadline)
+                            if showHidden, !hidden.isEmpty {
+                                Section {
+                                    ForEach(hidden) { a in
+                                        NavigationLink(value: Route.agent(a.id)) { AgentRow(agent: a) }
+                                            .botMenu(a, needsOf: $needsOf)
+                                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                                    }
                                 }
                             }
                         }
@@ -109,17 +123,19 @@ struct HomeView: View {
             }
             .listStyle(.insetGrouped)
             .listSectionSpacing(.compact)
+            // No empty band under the title (search moved to the foot), and the list ends above the search field.
+            .contentMargins(.top, 4, for: .scrollContent)
             // A bot whose state changes slides into its new section.
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: shelves.map { "\($0.shelf.rawValue):\($0.bots.map(\.id))" })
-            .contentMargins(.bottom, store.needs.isEmpty ? 0 : 84, for: .scrollContent)
-            .overlay(alignment: .bottom) {
-                if !store.needs.isEmpty && query.isEmpty && !asking { reviewButton }
-            }
+
             // With nothing to show, the list itself says the server is away; the pill is for when old data is on screen.
             .overlay(alignment: .top) { if store.home != nil { OfflinePill().padding(.top, 6) } }
             .animation(.spring(duration: 0.35), value: store.online)
             .animation(.spring(duration: 0.35), value: store.needs.isEmpty)
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "Search chats and cards")
+            // Search opens from the magnifier in the top bar: a field always on screen (at the top, a second pill
+            // above "Ask Chief"; at the foot, floating over the last card) read as clutter.
+            .modifier(HomeSearch(on: $searchOn, query: $query, focused: $searchFocus))
+            .onChange(of: searchOn) { _, on in if !on { query = "" } }
             // One search per query for the whole list. Typing on restarts it, which cancels the one before.
             .task(id: searching ? "\(search.attempt) \(query)" : "") {
                 if searching { await search.run(query) } else { search.clear() }
@@ -137,6 +153,10 @@ struct HomeView: View {
                         .accessibilityLabel("Settings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button { withAnimation { searchOn = true } } label: { Image(systemName: "magnifyingglass") }
+                        .accessibilityLabel("Search messages and cards")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button { showNew = true } label: { Image(systemName: "plus") }
                         .accessibilityLabel("New bot or group")
                         // Nothing loaded from the server yet: a new bot could not be made.
@@ -145,10 +165,12 @@ struct HomeView: View {
                 ToolbarItem(placement: .principal) {
                     VStack(spacing: 0) {
                         Text("T3 Bot").font(.headline)
-                        Text(statusLine).font(.caption2).foregroundStyle(.secondary)
-                            .contentTransition(.numericText())
-                            .animation(.default, value: statusLine)
+                        if !statusLine.isEmpty {
+                            Text(statusLine).font(.caption2).foregroundStyle(.secondary)
+                                .transition(.opacity)
+                        }
                     }
+                    .animation(.default, value: statusLine)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -173,7 +195,10 @@ struct HomeView: View {
                 guard let w else { return }
                 if w == "settings" { showSettings = true }
                 if w == "new" { showNew = true }
-                if w.hasPrefix("search-") { query = String(w.dropFirst(7)) }
+                if w.hasPrefix("search-") {
+                    searchOn = true; query = String(w.dropFirst(7))
+                    Task { @MainActor in try? await Task.sleep(for: .seconds(1.5)); searchFocus = false }
+                }
                 if w.hasPrefix("needs-") { needsOf = String(w.dropFirst(6)) }
                 if !w.hasPrefix("edit-") { store.debugSheet = nil }
             }
@@ -211,17 +236,10 @@ struct HomeView: View {
     }
 
     /// Under the title: what needs you and who is working, at a glance.
+    /// Under the title only when something is off (offline, connecting, refused): the sections say the rest.
     private var statusLine: String {
-        guard let h = store.home else { return store.refused ? "Not paired" : store.online ? "Connecting" : "Offline" }
-        // The card under it already says there is no bot yet.
-        if h.agents.isEmpty { return store.online ? "Connected" : "Offline" }
-        let urgent = store.needs.filter { $0.rank <= 1 }.count
-        let working = h.agents.filter { Shelf.of($0, store) == .working }.count
-        var parts: [String] = []
-        if urgent > 0 { parts.append("\(urgent) urgent") }
-        // Alone under the title it starts with a capital, like "Connected" and "Offline".
-        parts.append(working == 0 ? (parts.isEmpty ? "All quiet" : "all quiet") : "\(working) working")
-        return parts.joined(separator: " · ")
+        guard store.home != nil else { return store.refused ? "Not paired" : store.online ? "Connecting" : "Offline" }
+        return store.online ? "" : "Offline"
     }
 
     /// First launch with nothing saved yet: the shape of the screen while the server answers.
@@ -259,7 +277,9 @@ struct HomeView: View {
                     .font(.headline)
                     .multilineTextAlignment(.center)
                 Text(store.refused
-                     ? "\(server) answered, but refused this phone's token. Pair again with the link or the QR code from t3bot pair."
+                     ? (Connection.current?.isDirect == true
+                        ? "\(server) answered, but refused this phone's token. Scan a new link from T3 Code's Settings > Sharing & access."
+                        : "\(server) answered, but refused this phone's token. Pair again with the link or the QR code from t3bot pair.")
                      : "T3 Bot keeps trying. Check that the server is running and that this phone is on the same network or VPN as it.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -312,88 +332,94 @@ struct HomeView: View {
             // Most urgent first among those that need you; the others keep their usual order, so they are easy to find.
             if shelf == .needsYou {
                 let rank = { (a: Agent) in store.needs.filter { $0.agent == a.id }.map(\.rank).min() ?? 9 }
-                bots = bots.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+                // An alarm goes before a question of the same rank: something is breaking.
+                let calm = { (a: Agent) in store.needs.contains { $0.agent == a.id && $0.kind == "alarm" } ? 0 : 1 }
+                bots = bots.enumerated().sorted {
+                    (rank($0.element), calm($0.element), $0.offset) < (rank($1.element), calm($1.element), $1.offset)
+                }.map(\.element)
             }
             return bots.isEmpty ? nil : ShelfGroup(shelf: shelf, bots: bots)
         }
-    }
-
-    /// Everything that needs you, one tap away: swipe through it (long press: the list).
-    private var reviewButton: some View {
-        let n = store.needs.count
-        let urgent = store.needs.filter { $0.rank <= 1 }.count
-        return Button { Haptics.tap(); store.showReview = true } label: {
-            // Always one line: when the full label is too wide (very large text), the urgent count goes and its
-            // dot stays.
-            ViewThatFits(in: .horizontal) {
-                reviewLabel(n, urgent: urgent, spelled: true)
-                reviewLabel(n, urgent: urgent, spelled: false)
-            }
-            .font(.subheadline)
-            .foregroundStyle(Color(.systemBackground))
-            .padding(.horizontal, 20).padding(.vertical, 13)
-            .glassEffect(.regular.tint(Color.primary.opacity(0.88)).interactive(), in: .capsule)
-            // The urgent dot is drawn over the glass, in the same place: inside it, the glass turned the
-            // orange dark red in the light appearance and pale yellow in the dark one.
-            .overlay {
-                ViewThatFits(in: .horizontal) {
-                    reviewLabel(n, urgent: urgent, spelled: true, dotOnly: true)
-                    reviewLabel(n, urgent: urgent, spelled: false, dotOnly: true)
-                }
-                .font(.subheadline)
-                .padding(.horizontal, 20).padding(.vertical, 13)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            }
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button { store.path.append(Route.allNeeds) } label: { Label("See as a list", systemImage: "list.bullet") }
-        }
-        .accessibilityLabel(urgent > 0 ? "Review \(n), \(urgent) urgent" : "Review \(n)")
-        // A floating bar: past this size it would cover the list it floats over.
-        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 14)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
-
-    /// `dotOnly` is the same row with everything but the dot invisible: it lays the dot over the glass.
-    private func reviewLabel(_ n: Int, urgent: Int, spelled: Bool, dotOnly: Bool = false) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "rectangle.stack.fill").opacity(dotOnly ? 0 : 1)
-            Text("Review \(n)").fontWeight(.semibold).contentTransition(.numericText()).opacity(dotOnly ? 0 : 1)
-            if urgent > 0 {
-                // An orange dot keeps the urgency visible on the pill in light and dark mode alike.
-                Circle().fill(dotOnly ? Color.orange : Color.clear).frame(width: 7, height: 7).padding(.leading, 2)
-                if spelled { Text("\(urgent) urgent").opacity(dotOnly ? 0 : 0.75) }
-            }
-        }
-        .lineLimit(1)
-        .fixedSize()
     }
 
     private func askField(_ chief: Agent) -> some View {
         let empty = ask.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         // The short form at the largest text sizes, where the long one is cut.
         let prompt: String = typeSize.isAccessibilitySize ? "Ask \(chief.name)" : "Ask \(chief.name) anything"
+        // A field that looks like one: filled, with its send button, under the lead bot with no line between.
         return HStack(alignment: .bottom, spacing: 8) {
             TextField(prompt, text: $ask, axis: .vertical)
                 .lineLimit(1...4)
                 .submitLabel(.send)
                 .focused($asking)
                 .onSubmit { send(chief) }
-                .padding(.vertical, 2)
-            if !empty {
-                Button { send(chief) } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 26)).symbolRenderingMode(.hierarchical)
+                .padding(.vertical, 8)
+            Button { send(chief) } label: {
+                Image(systemName: "arrow.up.circle.fill").font(.system(size: 28))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(Color(.systemBackground), empty ? Color(.tertiaryLabel) : Color.primary)
+                    // 44 points to the finger; the room is taken back from the layout, so nothing moves.
+                    .padding(8)
+                    .contentShape(Rectangle())
+                    .padding(-8)
+            }
+            .buttonStyle(.plain)
+            .disabled(empty)
+            .padding(.bottom, 3)
+            .accessibilityLabel("Send to \(chief.name)")
+        }
+        .padding(.leading, 14).padding(.trailing, 5)
+        .background(Capsule().fill(Color(.tertiarySystemFill)))
+        .animation(.spring(duration: 0.25), value: empty)
+    }
+
+    /// A strip of every bot's face and name: the way to message one that needs nothing (and the hidden ones).
+    private func roster(_ chief: Agent) -> some View {
+        let all = store.home?.agents ?? []
+        let shown = [chief] + all.filter { $0.id != chief.id && !$0.hidden } + all.filter { $0.id != chief.id && $0.hidden }
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 14) {
+                ForEach(shown) { a in
+                    Button { store.open(agent: a.id) } label: {
+                        VStack(spacing: 4) {
+                            Group {
+                                if a.kind == "group" { AvatarView(agent: a.id, size: 44) }
+                                else { LiveFace(face: a.face, size: 44, state: store.faceState(a), calm: true) }
+                            }
+                            .frame(width: 44, height: 44)
+                            // At work: a green dot on its face (the state, where the eye already is).
+                            .overlay(alignment: .bottomTrailing) {
+                                if Shelf.of(a, store) == .working {
+                                    Circle().fill(Color.green).frame(width: 11, height: 11)
+                                        .overlay(Circle().stroke(Color(.secondarySystemGroupedBackground), lineWidth: 2))
+                                }
+                            }
+                            Text(a.name).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                .frame(maxWidth: rosterName)
+                        }
+                        .opacity(a.hidden ? 0.45 : 1)
+                    }
+                    .buttonStyle(.plain)
+                    .botMenu(a, needsOf: $needsOf)
+                    .accessibilityLabel(a.hidden ? "\(a.name), hidden" : a.name)
+                    // The green dot, in a word.
+                    .accessibilityValue(Shelf.of(a, store) == .working ? "Working" : "")
                 }
-                .buttonStyle(.plain)
-                .transition(.scale.combined(with: .opacity))
-                .accessibilityLabel("Send to \(chief.name)")
+            }
+            .padding(.horizontal, 14)
+        }
+        // A fade at the trailing edge: it scrolls, and no name is cut in half.
+        .mask {
+            HStack(spacing: 0) {
+                Color.black
+                LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 28)
             }
         }
-        .animation(.spring(duration: 0.25), value: empty)
+    }
+
+    /// The lead bot has something to show beyond its field: an unread reply, or something it asks.
+    private func chiefHasNews(_ chief: Agent) -> Bool {
+        store.unread(chief) || store.needs.contains { $0.agent == chief.id && ($0.rank <= 1 || $0.isQuestion) }
     }
 
     /// Opens the lead bot's chat at once with the message in it; it is sent behind.
@@ -409,16 +435,37 @@ struct HomeView: View {
 
 struct AgentRef: Identifiable { let id: String }
 
-/// "Needs you · 2" with the section's own mark.
+/// A section's name. Needs you also carries the way into Review, with the one count of what waits on you.
 struct ShelfHeader: View {
     let shelf: Shelf
-    let count: Int
+    var review = 0
+    var onReview: () -> Void = {}
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle().fill(shelf.color).frame(width: 7, height: 7)
-            Text(shelf.title)
-            Text("\(count)").foregroundStyle(.tertiary).monospacedDigit()
+        HStack {
+            Text(shelf.title).accessibilityAddTraits(.isHeader)
+            Spacer()
+            if review > 0 {
+                Button(action: onReview) {
+                    HStack(spacing: 3) {
+                        Text("Review \(review)").contentTransition(.numericText())
+                        Image(systemName: "chevron.right").font(.caption2.weight(.bold))
+                    }
+                    // The app's main flow: a filled button, not a grey pill.
+                    .foregroundStyle(Color(.systemBackground))
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .background(Capsule().fill(Color.primary))
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                    .padding(.vertical, -8)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Review \(review)")
+                .accessibilityHint("Goes through what needs you one by one")
+                .contextMenu {
+                    Button { Store.shared.reviewAsList = true; Store.shared.showReview = true } label: { Label("See as a list", systemImage: "list.bullet") }
+                }
+            }
         }
         .font(.footnote.weight(.semibold))
         .textCase(nil)
@@ -521,6 +568,9 @@ enum Shelf: Int, CaseIterable {
     }
 
     @MainActor static func of(_ a: Agent, _ store: Store) -> Shelf {
+        // Waiting on you wins: a bot that asks, wants an approval or holds an urgent card is under Needs you even
+        // while it works, so Working only ever means busy.
+        if store.needs.contains(where: { $0.agent == a.id && ($0.isQuestion || $0.rank <= 1) }) { return .needsYou }
         // Just sent it a message: it is working, before the server has seen the run start.
         if store.outgoing[a.id] != nil { return .working }
         switch a.mood {
@@ -543,75 +593,121 @@ struct AgentRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            let s: CGFloat = prominent ? 54 : 44
-            if agent.kind == "group" {
-                AvatarView(agent: agent.id, size: s)
-            } else {
-                LiveFace(face: agent.face, size: s, state: store.faceState(agent))
+            let s: CGFloat = prominent ? 48 : 44
+            Group {
+                if agent.kind == "group" {
+                    AvatarView(agent: agent.id, size: s)
+                } else {
+                    LiveFace(face: agent.face, size: s, state: store.faceState(agent), calm: true)
+                }
             }
             VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(agent.name).font(prominent ? .title3.weight(unread ? .bold : .semibold) : .body.weight(unread ? .bold : .semibold)).lineLimit(1)
-                    Spacer(minLength: 4)
-                    if big {
-                        needsBadge
-                    } else if let last = agent.last {
-                        Text(Ago.short(last.at)).font(.caption.weight(unread ? .semibold : .regular))
-                            .foregroundStyle(unread ? Color.blue : Color.secondary).monospacedDigit()
+                if !big, let row = askRow {
+                    // Something it asks (or why it stopped): that is the title, full width; the bot, its age and the
+                    // kind under it. One format for every row of Needs you, as in the Needs list.
+                    // The tag trailing on the title's first line, as in the Needs list, Review and Search.
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(row.title).font(.body.weight(.medium)).foregroundStyle(.primary).lineLimit(2)
+                        Spacer(minLength: 4)
+                        row.tag
                     }
-                    if unread { Circle().fill(Color.blue).frame(width: 9, height: 9).transition(.scale.combined(with: .opacity)) }
+                    // No dangling dot when the time is unknown (a bot that stopped before its first message).
+                    Text([agent.name, Ago.short(row.at)].filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                } else {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(agent.name).font(prominent ? .headline : .body.weight(unread ? .bold : .semibold)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    // The kind, trailing like in every list.
+                    if let c = urgentCard { KindTag(card: c) } else if agent.mood == "failed" { KindTag(word: "Stopped") }
+                    // The age of what the row says: its ask when it shows one, else its last message. At work and
+                    // with nothing to ask, a live dot: "Writing" beside "2h" read as two different times.
+                    if !big {
+                        // At work with nothing to ask: no time (its status says it is working now).
+                        if urgentCard == nil, Shelf.of(agent, store) == .working {
+                            EmptyView()
+                        } else if let at = urgentCard?.at ?? agent.last?.at {
+                            Text(Ago.short(at)).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                    }
                 }
                 .animation(.spring(duration: 0.3), value: unread)
-                // One line only: the rows stay short so every bot fits on screen (two at the largest text sizes).
-                HStack(spacing: 6) {
-                    if let u = urgentLine {
-                        Text(u).foregroundStyle(Color.orange)
+                // One line, except an ask (two): the rows stay short so every bot fits on screen.
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if let c = urgentCard {
+                        // The whole ask, on two lines if it needs them (its kind is beside the name).
+                        // Quieter than the bot's name above it: the name and the tag carry the row.
+                        Text(c.title).foregroundStyle(Color.secondary).lineLimit(2)
+                    } else if agent.mood == "failed" {
+                        Text(subtitle).foregroundStyle(Color.secondary)
                     } else if let doing = agent.activityText, Shelf.of(agent, store) == .working {
-                        Image(systemName: activitySymbol)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.blue)
-                            .symbolEffect(.pulse, options: .repeating)
-                        Text(agent.mood == "watching" ? "\(doing) · \(agent.watching.first ?? "")" : doing).foregroundStyle(.secondary)
+                        Text(doing).foregroundStyle(.secondary)
                     } else if let d = store.drafts[agent.id] {
                         Text("\(Text("Draft: ").fontWeight(.semibold))\(Text(verbatim: d))").foregroundStyle(.secondary)
                     } else {
                         Text(subtitle).foregroundStyle(unread ? Color.primary : Color.secondary)
                     }
                     Spacer(minLength: 4)
-                    if !big { needsBadge }
                 }
                 .font(.subheadline)
-                .lineLimit(big ? 2 : 1)
+                .lineLimit(big || urgentCard != nil || agent.mood == "failed" ? 2 : 1)
                 if big, let last = agent.last {
                     Text(Ago.short(last.at)).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                }
                 }
             }
         }
         .padding(.vertical, prominent ? 4 : 1)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
     }
 
-    /// How many things this bot needs from you.
-    @ViewBuilder private var needsBadge: some View {
-        if agent.needs > 0 {
-            Text("\(agent.needs)")
-                .font(.caption.weight(.bold)).monospacedDigit()
-                .lineLimit(1)
-                .padding(.horizontal, 7).padding(.vertical, 1)
-                .background(Capsule().fill(Color.primary))
-                .foregroundStyle(Color(.systemBackground))
-                .contentTransition(.numericText())
+    /// The row as one VoiceOver sentence: who, its state (the tag, the weight and the face say it to the eye
+    /// only), what it says, and when in whole words.
+    private var spoken: String {
+        var parts: [String] = [agent.name]
+        if let c = urgentCard {
+            parts.append("\(CardText.tag(c).word): \(c.title)")
+            parts.append(SpokenAgo.text(c.at))
+        } else if agent.mood == "failed" {
+            parts.append("Stopped")
+            parts.append(subtitle)
+            parts.append(SpokenAgo.text(agent.last?.at ?? ""))
+        } else if Shelf.of(agent, store) == .working {
+            parts.append(agent.activityText ?? "Working")
+        } else if let d = store.drafts[agent.id] {
+            parts.append("Draft: \(d)")
+        } else {
+            if unread { parts.append("Unread") }
+            parts.append(subtitle)
+            parts.append(SpokenAgo.text(agent.last?.at ?? ""))
         }
+        return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
     /// A reply that has not been opened yet.
     private var unread: Bool { store.unread(agent) }
 
-    /// Its most urgent card, said plainly (a question, a customer waiting, money, an alarm).
-    private var urgentLine: String? {
-        guard let c = store.needs.first(where: { $0.agent == agent.id && $0.rank <= 1 }) else { return nil }
-        let prefix = c.isApproval ? "" : c.isQuestion ? "Asks: " : c.customer == true ? "Customer waiting: " : c.kind == "alarm" ? "Alarm: " : ""
-        return "● " + prefix + c.title
+    /// What a Needs you row says: its most urgent card, or why the bot stopped.
+    private var askRow: (title: String, at: String, tag: KindTag)? {
+        if let c = urgentCard { return (c.title, c.at, KindTag(card: c)) }
+        if agent.mood == "failed" { return (subtitle, agent.last?.at ?? "", KindTag(word: "Stopped")) }
+        return nil
+    }
+
+    /// Its most urgent card (an alarm first, then the lowest rank).
+    private var urgentCard: Card? {
+        let mine = store.needs.filter { $0.agent == agent.id && ($0.rank <= 1 || $0.isQuestion) }
+        return mine.min { ($0.kind == "alarm" ? 0 : 1, $0.rank) < ($1.kind == "alarm" ? 0 : 1, $1.rank) }
+    }
+
+    /// Said plainly. Its mark already tells a question, an approval or an alarm; words say the rest.
+    private func urgentText(_ c: Card) -> String {
+        (c.customer == true && !c.isQuestion ? "Customer waiting: " : "") + c.title
+    }
+
+    private var othersWaiting: Int {
+        guard urgentCard != nil else { return 0 }
+        return max(0, store.needs.filter { $0.agent == agent.id }.count - 1)
     }
 
     private var activitySymbol: String {
@@ -638,6 +734,8 @@ struct CardRow: View {
     let card: Card
     /// Where the full card opens; the home screen's sheet when nil.
     var onTap: ((Card) -> Void)? = nil
+    /// Words searched for, shown in bold in the title.
+    var highlight: String? = nil
 
     var body: some View {
         Button { if let onTap { onTap(card) } else { store.selectedCard = card } } label: {
@@ -645,18 +743,19 @@ struct CardRow: View {
                 AvatarView(agent: card.agent, size: 28)
                 VStack(alignment: .leading, spacing: 3) {
                     // Hyphens that do not break: "--only" was cut after its dashes, with room left on the line.
-                    Text(card.title.unbroken).font(.subheadline).foregroundStyle(.primary).lineLimit(3).multilineTextAlignment(.leading)
-                    HStack(spacing: 6) {
-                        if card.rank <= 1 {
-                            Circle().fill(card.rank == 0 ? Color.orange : Color.red).frame(width: 6, height: 6)
-                        }
-                        Text(CardText.meta(card, store)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
+                    Text(SearchText.marked(card.title.unbroken, highlight ?? "")).font(.subheadline).foregroundStyle(.primary).lineLimit(3).multilineTextAlignment(.leading)
+                    Text(CardText.meta(card, store)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
+                // Every row's line starts under its text, the same in every row.
+                .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
+                Spacer(minLength: 8)
+                // What kind of answer it wants, in a word.
+                KindTag(card: card).padding(.top, 2)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(CardText.spoken(card, store))
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if !card.isQuestion {
                 Button("Done") { store.act(card, "done") }.tint(.green)
@@ -667,25 +766,43 @@ struct CardRow: View {
 }
 
 enum CardText {
+    /// The kind in a word, named for what you do: four kinds, each with its own colour (KindTag).
+    static func tag(_ c: Card) -> (word: String, alarm: Bool) {
+        if c.kind == "alarm" { return ("Alarm", true) }
+        if c.isApproval || c.kind == "approve" { return ("Approve", false) }
+        if c.isQuestion { return ("Answer", false) }
+        return ("To do", false)
+    }
+
+    /// One quiet mark per kind, the same set everywhere (home, Needs, the chat's banner); red only for an alarm.
+    static func mark(_ c: Card) -> (symbol: String, alarm: Bool)? {
+        if c.kind == "alarm" { return ("exclamationmark.triangle.fill", true) }
+        if c.isApproval { return ("checkmark.shield", false) }
+        if c.isQuestion { return ("questionmark.bubble", false) }
+        if c.customer == true { return ("person", false) }
+        if let d = c.draft {
+            if d.event != nil { return ("calendar", false) }
+            if d.via == "mail" || d.subject != nil { return ("envelope", false) }
+            return ("message", false)
+        }
+        // A decision to make, or something to do; never a bare circle, which reads as a box to tick.
+        return (c.kind == "approve" ? "checkmark.seal" : "checklist", false)
+    }
+
+    /// A card's row as VoiceOver says it: the kind first (colour and a symbol say it to the eye), then who and when.
+    @MainActor
+    static func spoken(_ c: Card, _ store: Store) -> String {
+        let who = store.agent(c.agent)?.name ?? c.agent
+        return ["\(tag(c).word): \(c.title)", who, SpokenAgo.text(c.at)].filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
     @MainActor
     static func meta(_ c: Card, _ store: Store) -> String {
         let bot = store.agent(c.agent)
         let who = bot?.name ?? c.agent
         var parts: [String] = []
-        if c.isQuestion {
-            // A row has no name beside its face, so the line starts with the bot. Its own thread is titled
-            // "%BOT <name>" on the server, which nobody says: only another thread is named.
-            let thread = CardHeader.threadName(c.threadTitle ?? "")
-            let own = thread.isEmpty || thread == who || (c.threadId != nil && c.threadId == bot?.threadId)
-            parts.append(who)
-            if c.isApproval { parts.append(own ? "approval" : "approval in \(thread)") }
-            else { parts.append(own ? "question" : "asks in \(thread)") }
-        } else {
-            parts.append(c.deskName ?? who)
-            if c.customer == true { parts.append("customer waiting") }
-            if let m = c.minutes, m > 0 { parts.append("\(Int(m.rounded()))\u{00A0}min") }
-            if c.kind == "alarm" { parts.append("alarm") }
-        }
+        // Who and how old; the tag beside the title says what kind it is, and the card says the rest.
+        parts.append(who)
         parts.append(Ago.short(c.at))
         return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
@@ -701,7 +818,19 @@ struct AllNeedsView: View {
                 // A rank outside the known ones still shows, in the nearest group.
                 let items = needs.filter { ranks.contains(min(max($0.rank, 0), 4)) }
                 if !items.isEmpty {
-                    Section("\(title) · \(items.count)") { ForEach(items) { CardRow(card: $0) } }
+                    Section {
+                        // Its own dividers, all under the text: the list's own once ran one of them full width.
+                        ForEach(Array(items.enumerated()), id: \.element.id) { i, c in
+                            CardRow(card: c)
+                                .listRowSeparator(.hidden)
+                                .overlay(alignment: .bottom) {
+                                    if i < items.count - 1 { Divider().padding(.leading, 38).offset(y: 11) }
+                                }
+                        }
+                    } header: {
+                        // The size of a footnote, like the system's own list headers.
+                        ListHeader(text: "\(title) · \(items.count)")
+                    }
                 }
             }
         }
@@ -720,9 +849,8 @@ struct AllNeedsView: View {
         .refreshable { await store.refresh() }
     }
 
-    private var groups: [(String, Set<Int>)] {
-        [("Questions and alarms", [0]), ("Now", [1]), ("Today", [2]), ("This week", [3]), ("Later", [4])]
-    }
+    static let groups: [(String, Set<Int>)] = [("Urgent", [0]), ("Now", [1]), ("Today", [2]), ("This week", [3]), ("Later", [4])]
+    private var groups: [(String, Set<Int>)] { Self.groups }
 }
 
 struct KnowView: View {
@@ -837,6 +965,12 @@ struct KnowView: View {
 /// The width the app has on screen: its window, else the screen it is on.
 @MainActor
 enum ScreenSize {
+    static var height: CGFloat {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        return scene?.keyWindow?.bounds.height ?? scene?.screen.bounds.height ?? 844
+    }
+
     static var width: CGFloat {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
@@ -874,7 +1008,8 @@ struct ToastBar: View {
             if let t = shown {
                 HStack(spacing: 10) {
                     if t.busy { ProgressView().controlSize(.small) }
-                    else { Image(systemName: t.failed ? "exclamationmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(t.failed ? .red : .green) }
+                    else { Image(systemName: t.failed ? "exclamationmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(t.failed ? .red : .green)
+                        .accessibilityLabel(t.failed ? "Failed" : "Done") }
                     Text(t.text).font(.subheadline.weight(.medium)).lineLimit(3)
                     if let id = t.undo {
                         Button("Undo") { store.undoAction(id) }
@@ -891,6 +1026,33 @@ struct ToastBar: View {
             }
         }
         .animation(.spring(duration: 0.3), value: shown)
+        .onChange(of: shown?.text) { _, text in if let text { Self.announce(text) } }
+    }
+
+    /// VoiceOver says the toast: it comes and goes on its own, and nothing else tells what just happened.
+    /// Several bars can be alive at once (home, a chat, Review), so the same text is said once.
+    private static var lastSaid: (text: String, at: Date)?
+    private static func announce(_ text: String) {
+        guard UIAccessibility.isVoiceOverRunning else { return }
+        if let l = lastSaid, l.text == text, Date().timeIntervalSince(l.at) < 1.5 { return }
+        lastSaid = (text, Date())
+        AccessibilityNotification.Announcement(text).post()
+    }
+}
+
+/// A time as VoiceOver says it: "5 minutes ago", where the screen shows "5m" (read aloud as "5 metres").
+enum SpokenAgo {
+    static func text(_ iso: String, now: Date = Date()) -> String {
+        guard let d = Ago.date(iso) else { return "" }
+        return text(d, now: now)
+    }
+
+    static func text(_ d: Date, now: Date = Date()) -> String {
+        let s = max(0, Int(now.timeIntervalSince(d)))
+        if s < 60 { return "just now" }
+        if s < 3600 { return s / 60 == 1 ? "1 minute ago" : "\(s / 60) minutes ago" }
+        if s < 86400 { return s / 3600 == 1 ? "1 hour ago" : "\(s / 3600) hours ago" }
+        return s / 86400 == 1 ? "1 day ago" : "\(s / 86400) days ago"
     }
 }
 
@@ -911,6 +1073,8 @@ struct OfflinePill: View {
                             .glassEffect(.regular.interactive(), in: .capsule)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Token refused")
+                    .accessibilityHint("Opens pairing, to connect this iPhone again")
                 } else {
                     TimelineView(.periodic(from: .now, by: 30)) { context in
                         Label(Self.text(since: store.lastSync, now: context.date), systemImage: "wifi.slash")
@@ -918,6 +1082,8 @@ struct OfflinePill: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 12).padding(.vertical, 6)
                             .glassEffect(.regular, in: .capsule)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(store.lastSync.map { "Offline, updated \(SpokenAgo.text($0, now: context.date))" } ?? "Offline, reconnecting")
                     }
                 }
             }
@@ -954,6 +1120,12 @@ struct SearchResults: View {
         }
     }
 
+    /// The same words from the same bot found twice (a reply sent again, a retried turn) show once, the newest.
+    private var messages: [Hit] {
+        var seen = Set<String>()
+        return model.messages.filter { seen.insert("\($0.agent ?? "")|\($0.role)|\($0.snippet)").inserted }
+    }
+
     var body: some View {
         // One row while it loads, so the list is never empty during a search.
         if model.loading && model.cards.isEmpty && model.messages.isEmpty {
@@ -966,22 +1138,34 @@ struct SearchResults: View {
             }
         }
         if !cards.isEmpty {
-            Section("Cards") { ForEach(cards) { CardRow(card: $0) } }
+            Section { ForEach(cards) { CardRow(card: $0, highlight: query) } } header: { ListHeader(text: "Cards") }
         }
-        if !model.messages.isEmpty {
-            Section("Messages") {
-                ForEach(model.messages) { m in
+        if !messages.isEmpty {
+            Section {
+                ForEach(messages) { m in
                     Button { if let a = m.agent { store.open(agent: a) } } label: {
                         HStack(alignment: .top, spacing: 10) {
-                            AvatarView(agent: m.agent ?? store.chiefId, size: 28)
+                            if m.role == "user" {
+                                // My own words: my mark, not the bot's face.
+                                // In the colour of my own bubbles, so "You" reads as me at a glance.
+                                Image(systemName: "person.fill")
+                                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                                    .frame(width: 28, height: 28)
+                                    .background(Circle().fill(Color(.tertiarySystemFill)))
+                                    .accessibilityHidden(true)
+                            } else {
+                                AvatarView(agent: m.agent ?? store.chiefId, size: 28)
+                            }
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack {
                                     Text(m.role == "user" ? "You to \(store.agent(m.agent ?? "")?.name ?? "")" : store.agent(m.agent ?? "")?.name ?? "")
                                         .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                                     Spacer()
                                     Text(Ago.short(m.at)).font(.caption2).foregroundStyle(.tertiary)
+                                        .accessibilityLabel(SpokenAgo.text(m.at))
                                 }
-                                Text(m.snippet).font(.subheadline).foregroundStyle(.primary).lineLimit(3).multilineTextAlignment(.leading)
+                                Text(SearchText.marked(SearchText.sentence(SearchText.prose(m.snippet), query), query))
+                                    .font(.subheadline).foregroundStyle(.primary).lineLimit(3).multilineTextAlignment(.leading)
                             }
                         }
                         // The whole row opens the chat, its empty parts too, like a card row.
@@ -989,9 +1173,9 @@ struct SearchResults: View {
                     }
                     .buttonStyle(.plain)
                 }
-            }
+            } header: { ListHeader(text: "Messages") }
         }
-        if !model.loading && cards.isEmpty && model.messages.isEmpty {
+        if !model.loading && cards.isEmpty && messages.isEmpty {
             if model.failed {
                 Label(store.online ? "Search did not answer. Try again in a moment." : "Search needs the server, and it cannot be reached right now.",
                       systemImage: "wifi.slash")
@@ -1000,6 +1184,127 @@ struct SearchResults: View {
                 Text("Nothing found for \u{201C}\(query)\u{201D}.").foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// Home's search, only while it is open.
+private struct HomeSearch: ViewModifier {
+    @Binding var on: Bool
+    @Binding var query: String
+    /// Off for screen checks, so the results show without the keyboard over them.
+    var focused: FocusState<Bool>.Binding
+
+    func body(content: Content) -> some View {
+        if on {
+            content.searchable(text: $query, isPresented: $on, placement: .navigationBarDrawer(displayMode: .always),
+                               prompt: "Search messages and cards")
+                .searchFocused(focused)
+        } else {
+            content
+        }
+    }
+}
+
+/// One section header style everywhere: a footnote in the secondary colour.
+/// A card's kind as a small word ("Alarm", "Approval", "Question"), the same on home, in lists and in chats.
+struct KindTag: View {
+    var word: String
+    var alarm = false
+
+    init(card: Card) { let t = CardText.tag(card); word = t.word; alarm = t.alarm }
+    init(word: String, alarm: Bool = false) { self.word = word; self.alarm = alarm }
+
+    /// One symbol and colour per kind, so a list can be scanned by kind: red alarm, orange approve, blue answer.
+    private var tint: Color? {
+        if alarm { return .red }
+        // One colour per kind, on the symbol and word only (no pill: grey pills looked like buttons).
+        switch word {
+        case "Approve": return .orange
+        case "Answer": return .blue
+        default: return nil
+        }
+    }
+
+    private var symbol: String {
+        if alarm { return "exclamationmark.triangle.fill" }
+        switch word {
+        case "Approve": return "checkmark.shield.fill"
+        case "Answer": return "questionmark.bubble.fill"
+        case "Stopped": return "xmark.octagon.fill"
+        default: return "checklist"
+        }
+    }
+
+    var body: some View {
+        Label { Text(word) } icon: { Image(systemName: symbol).font(.system(size: 8, weight: .bold)) }
+            .labelStyle(TagLabelStyle())
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(tint ?? Color.secondary)
+            .fixedSize()
+    }
+}
+
+/// Symbol and word close together, as one small tag.
+private struct TagLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 3) { configuration.icon; configuration.title }
+    }
+}
+
+struct ListHeader: View {
+    let text: String
+    // The secondary label colour itself: .secondary inside a list header came out a step fainter (tertiary).
+    var body: some View { Text(text).font(.footnote.weight(.semibold)).foregroundStyle(Color(.secondaryLabel)).textCase(nil).accessibilityAddTraits(.isHeader) }
+}
+
+/// How a search hit reads: words, not code, with what was searched for in bold.
+enum SearchText {
+    /// A snippet stops where code starts (`<Image · src="..." · width={1200}`): the row is there to find the
+    /// message, and the chat shows the code properly.
+    static func prose(_ snippet: String) -> String {
+        let code = CharacterSet(charactersIn: "<>{}=;`")
+        var kept: [String] = []
+        var cut = false
+        for part in snippet.components(separatedBy: " · ") {
+            if let r = part.rangeOfCharacter(from: code) {
+                let head = part[..<r.lowerBound].trimmingCharacters(in: CharacterSet(charactersIn: " :,(-"))
+                if !head.isEmpty { kept.append(head) }
+                cut = true
+                break
+            }
+            kept.append(part)
+        }
+        guard cut, !kept.isEmpty else { return snippet }
+        var out = kept.joined(separator: " · ")
+        while out.hasSuffix("…") { out.removeLast() }
+        return out + "…"
+    }
+
+    /// A snippet cut mid-sentence ("…over the old two-line headline. Headline: …") starts at the next sentence,
+    /// when the words searched for come after it.
+    static func sentence(_ snippet: String, _ query: String) -> String {
+        guard snippet.hasPrefix("…") else { return snippet }
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let hit = q.isEmpty ? nil : snippet.range(of: q, options: [.caseInsensitive, .diacriticInsensitive])
+        for mark in [". ", "? ", "! ", " · "] {
+            if let r = snippet.range(of: mark), hit.map({ r.upperBound <= $0.lowerBound }) ?? true {
+                let rest = snippet[r.upperBound...]
+                if rest.count >= 30 { return String(rest) }
+            }
+        }
+        return snippet
+    }
+
+    static func marked(_ text: String, _ query: String) -> AttributedString {
+        var a = AttributedString(text)
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return a }
+        var from = a.startIndex
+        while from < a.endIndex, let r = a[from...].range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) {
+            a[r].inlinePresentationIntent = .stronglyEmphasized
+            from = r.upperBound
+        }
+        return a
     }
 }
 

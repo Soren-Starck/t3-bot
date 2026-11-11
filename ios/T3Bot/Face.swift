@@ -22,18 +22,27 @@ struct LiveFace: View {
     let face: Face
     var size: CGFloat
     var state: FaceState = .idle
+    /// Idle blinks. Off in lists: they say nothing about the bot, and a face caught mid-blink looks broken.
+    var blinks = true
+    /// Lists and sheets: each state is a held expression (wide eyes when it needs you, sad when it failed, focused
+    /// while it works) instead of a looping animation, whose in-between frames (one eye, a bar) looked broken.
+    var calm = false
     @State private var ready = false
 
     var body: some View {
         ZStack {
             if !ready {
-                StoredImage(key: "skin:\(face.skin)", path: "v1/avatars/skins/\(face.skin).png") {
+                // The stock picture ships with the app: there at once, with or without a server.
+                StoredImage(key: "skin:\(face.skin)", path: "skin:\(face.skin)") {
                     Circle().fill(Color(.secondarySystemFill)).padding(size * 0.12)
                 }
                 .padding(size * 0.07)
                 .transition(.opacity)
             }
-            FaceWebView(face: face, size: size, state: state) { withAnimation(.easeOut(duration: 0.25)) { ready = true } }
+            FaceWebView(face: face, size: size, state: state, blinks: blinks && !calm, calm: calm,
+                        onReady: { withAnimation(.easeOut(duration: 0.25)) { ready = true } },
+                        // Its web process was killed (memory): the still covers it again until it has redrawn.
+                        onLost: { ready = false })
                 .opacity(ready ? 1 : 0.011)
         }
         .frame(width: size, height: size)
@@ -46,7 +55,10 @@ struct FaceWebView: UIViewRepresentable {
     let face: Face
     var size: CGFloat
     var state: FaceState
+    var blinks = true
+    var calm = false
     var onReady: () -> Void
+    var onLost: () -> Void = {}
 
     /// The library, read once and injected into every face (the pages themselves stay tiny).
     static let librarySource: String = Bundle.main.url(forResource: "boopface.iife", withExtension: "js")
@@ -66,6 +78,7 @@ struct FaceWebView: UIViewRepresentable {
         web.isUserInteractionEnabled = false
         web.navigationDelegate = context.coordinator
         context.coordinator.onReady = onReady
+        context.coordinator.onLost = onLost
         context.coordinator.html = page()
         context.coordinator.last = state
         context.coordinator.skin = face.skin
@@ -75,9 +88,10 @@ struct FaceWebView: UIViewRepresentable {
 
     func updateUIView(_ web: WKWebView, context: Context) {
         context.coordinator.onReady = onReady
+        context.coordinator.onLost = onLost
         if context.coordinator.skin != face.skin {
             context.coordinator.skin = face.skin
-            web.evaluateJavaScript("window.t3botSkin && window.t3botSkin('\(face.skin)')")
+            web.evaluateJavaScript("window.t3botSkin && window.t3botSkin('\(face.skin.inScript)')")
         }
         guard context.coordinator.last != state else { return }
         context.coordinator.last = state
@@ -95,6 +109,7 @@ struct FaceWebView: UIViewRepresentable {
         var skin: String?
         var html = ""
         var onReady: () -> Void = {}
+        var onLost: () -> Void = {}
 
         func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
             DispatchQueue.main.async { self.onReady() }
@@ -106,11 +121,17 @@ struct FaceWebView: UIViewRepresentable {
             webView.evaluateJavaScript("!!(window.customElements && customElements.get('boop-face'))") { defined, _ in
                 if (defined as? Bool) != true { webView.evaluateJavaScript(FaceWebView.librarySource) }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.onReady() }
+            // Only a face that has drawn something replaces the still: a blank square is worse than the picture.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak webView] in
+                webView?.evaluateJavaScript(FaceWebView.drawn) { drawn, _ in
+                    if (drawn as? Bool) == true { self?.onReady() }
+                }
+            }
         }
 
         /// iOS can kill a web view's process while the app sleeps; the face would come back blank. Reload it.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            DispatchQueue.main.async { self.onLost() }
             webView.loadHTMLString(html, baseURL: nil)
             let state = last
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -118,6 +139,9 @@ struct FaceWebView: UIViewRepresentable {
             }
         }
     }
+
+    /// True once the face element has content to show (in its shadow root or in itself).
+    static let drawn = "(() => { const f = document.getElementById('f'); return !!(f && ((f.shadowRoot && f.shadowRoot.childElementCount) || f.childElementCount)); })()"
 
     /// The content controller keeps its handler strongly; this breaks the cycle with the coordinator.
     final class WeakHandler: NSObject, WKScriptMessageHandler {
@@ -132,12 +156,13 @@ struct FaceWebView: UIViewRepresentable {
         <!doctype html><html><head><meta name="viewport" content="width=\(px),initial-scale=1,user-scalable=no">
         <style>html,body{margin:0;background:transparent;overflow:hidden}
         body{display:flex;align-items:center;justify-content:center;width:\(px)px;height:\(px)px}</style></head><body>
-        <boop-face id="f" size="\(Int(size * 0.86))" skin="\(face.skin)" auto-sleep="0" wake-on="manual" press-squeeze="false" antenna-drag="false"></boop-face>
+        <boop-face id="f" size="\(Int(size * 0.86))" skin="\(face.skin.inAttribute)" auto-sleep="0" wake-on="manual" press-squeeze="false" antenna-drag="false"></boop-face>
         <script>
         (function boot() {
           const f = document.getElementById('f');
           if (!customElements.get('boop-face')) { return setTimeout(boot, 30); }
           f.setPointerFollow && f.setPointerFollow(false);
+          \(blinks ? "" : "f._updateBlink = function () { this._blink = 1; };")
           let loop = null, cur = null;
           const quiet = () => {
             clearInterval(loop); loop = null;
@@ -149,6 +174,19 @@ struct FaceWebView: UIViewRepresentable {
             if (s === cur) return;
             const was = cur; cur = s; quiet();
             if (was === 'asleep') { try { await f.wake(); } catch (e) {} }
+            if (\(calm ? "true" : "false")) {
+              // Set once the face has drawn (set before, the eyes could stay at nothing). Working holds the plain
+              // face: the library's "input" pose is a text cursor, one thin bar, which read as a broken face.
+              const hold = (p) => setTimeout(() => { if (cur === s) { try { f.setState(p, { duration: 260 }); } catch (e) {} } }, 450);
+              switch (s) {
+                case 'waiting': hold('surprise'); break;
+                case 'failed': hold('sad'); break;
+                case 'asleep': f.sleep(); break;
+                case 'success': case 'affirm': hold('happy'); setTimeout(() => { if (cur === s) { try { f.setState('idle'); } catch (e) {} } }, 1900); break;
+                default: f.reset();
+              }
+              return;
+            }
             switch (s) {
               case 'working': case 'thinking': f.startWaiting({ variant: 'wave' }); break;
               case 'reading': f.play('inspect'); loop = setInterval(() => f.play('inspect'), 3200); break;
@@ -197,17 +235,8 @@ struct AvatarView: View {
             }
         }
         .frame(width: size, height: size)
-        .overlay(alignment: .bottomTrailing) {
-            if status == "working" {
-                Circle().fill(Color.blue)
-                    .frame(width: size * 0.24, height: size * 0.24)
-                    .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
-            } else if status == "waiting" {
-                Circle().fill(Color.orange)
-                    .frame(width: size * 0.24, height: size * 0.24)
-                    .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
-            }
-        }
+        // A picture of the bot beside its name, like the live face: the name is what VoiceOver reads.
+        .accessibilityHidden(true)
     }
 }
 
@@ -304,5 +333,20 @@ extension Color {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         c.getRed(&r, green: &g, blue: &b, alpha: &a)
         return String(format: "#%02x%02x%02x", Int(round(max(0, min(1, r)) * 255)), Int(round(max(0, min(1, g)) * 255)), Int(round(max(0, min(1, b)) * 255)))
+    }
+}
+
+private extension String {
+    /// A skin's name as it goes inside the page's single-quoted script string: a quote or a backslash in a name
+    /// the server sent would end the string and run as script.
+    var inScript: String {
+        replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+
+    /// The same, for the page's HTML attribute.
+    var inAttribute: String {
+        replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
     }
 }

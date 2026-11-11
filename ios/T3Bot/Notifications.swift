@@ -43,6 +43,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         return [
             UNNotificationCategory(identifier: "CARD", actions: [handle, done, snooze], intentIdentifiers: []),
             UNNotificationCategory(identifier: "QUESTION", actions: [answer], intentIdentifiers: []),
+            // A T3 Code pairing's generic push, before the notification extension names it.
+            UNNotificationCategory(identifier: "T3REQUEST", actions: [], intentIdentifiers: []),
             UNNotificationCategory(identifier: "QUESTION_MULTI", actions: [], intentIdentifiers: []),
             UNNotificationCategory(identifier: "APPROVAL", actions: [approve, decline], intentIdentifiers: []),
             UNNotificationCategory(identifier: "REPLY", actions: [reply], intentIdentifiers: []),
@@ -59,6 +61,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         // Shown in Settings, under Notifications, where it stays until iOS registers this phone.
         Task { @MainActor in Store.shared.pushError = "Push not available: \(error.localizedDescription)" }
+    }
+
+    /// A bot's answer reached the phone while T3 Bot was in memory: its Live Activity ends with that answer.
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        let t3 = userInfo["t3"] as? [String: Any]
+        Task { @MainActor in
+            await Store.shared.refresh()
+            if (t3?["kind"] as? String) == "reply", let thread = t3?["thread"] as? String,
+               let a = Store.shared.home?.agents.first(where: { $0.threadId == thread }) {
+                await Store.shared.loadTimeline(a.id)
+                let text = Store.shared.timelines[a.id]?.entries.last { $0.type == "agent" && $0.working != true }?.text ?? ""
+                Store.shared.endLive(a.id, text: text)
+            }
+            completionHandler(.newData)
+        }
     }
 
     // A push for the chat already on screen only refreshes it.
@@ -109,6 +127,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                     sent = await Self.deliver("v1/answer", ["threadId": threadId, "requestId": requestId, "decision": approve ? "accept" : "decline"])
                     if !sent { Self.notSent(approve ? "\u{201C}Approve\u{201D}" : "\u{201C}Decline\u{201D}", content) }
                 }
+            case let id where id.hasPrefix("OPT:"):
+                // One of the question's own options, tapped on the lock screen.
+                let options = payload["options"] as? [String] ?? []
+                if let threadId, let requestId, let questionId, let i = Int(id.dropFirst(4)), i < options.count {
+                    sent = await Self.deliver("v1/answer", ["threadId": threadId, "requestId": requestId, "answers": [questionId: options[i]]])
+                    if !sent { Self.notSent("\u{201C}\(options[i])\u{201D}", content) }
+                }
             case "ANSWER":
                 if let threadId, let requestId, let questionId, let text, !text.isEmpty {
                     sent = await Self.deliver("v1/answer", ["threadId": threadId, "requestId": requestId, "answers": [questionId: text]])
@@ -124,7 +149,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                     }
                 }
             default:
-                Store.shared.open(agent: agent)
+                if named == nil, cardId == nil, payload["kind"] != nil, (threadId ?? "").isEmpty {
+                    // A ring from T3 Code that names no thread (its hook had no thread id): the app's home, where
+                    // what waits is listed, not the leading bot's chat.
+                    Store.shared.path = .init()
+                    Store.shared.currentAgent = nil
+                } else {
+                    Store.shared.open(agent: agent)
+                }
                 if let cardId, cardId.hasPrefix("req:") || cardId.hasPrefix("desk:") || cardId.hasPrefix("note:") {
                     await Store.shared.open(card: cardId)
                 }
@@ -149,7 +181,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // The server answered and refused: a second try changes nothing.
                 return false
             } catch {
-                if attempt == 0 { try? await Task.sleep(for: .seconds(1.5)) }
+                // The second try goes out on new connections: the one kept from before can be dead.
+                if attempt == 0 {
+                    API.rebuildSessions()
+                    try? await Task.sleep(for: .seconds(1.5))
+                }
             }
         }
         return false

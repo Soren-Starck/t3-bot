@@ -41,6 +41,9 @@ enum Markdown {
         }
         for r in code { out[r][AttributeScopes.SwiftUIAttributes.BackgroundColorAttribute.self] = Color(.tertiarySystemFill) }
         linkify(&out)
+        // Links in the text colour (the app's one accent), underlined so they still read as links.
+        let links = out.runs.filter { $0.link != nil }.map(\.range)
+        for r in links { out[r].underlineStyle = .single }
         inlineCache.setObject(InlineBox(out), forKey: s as NSString)
         return out
     }
@@ -242,7 +245,12 @@ enum Markdown {
         let rest = t.dropFirst(level)
         guard rest.first == " " else { return nil }
         var title = rest.trimmingCharacters(in: .whitespaces)
-        while title.hasSuffix("#") { title.removeLast() }
+        // A closing run of "#" only counts after a space ("## Title ##"): "Learning C#" keeps its sharp.
+        let closing = title.reversed().prefix(while: { $0 == "#" }).count
+        if closing > 0 {
+            let head = title.dropLast(closing)
+            if head.isEmpty || head.last == " " { title = String(head) }
+        }
         title = title.trimmingCharacters(in: .whitespaces)
         if title.isEmpty { return nil }
         return (level: level, title: title)
@@ -425,7 +433,8 @@ private struct MarkdownList: View {
                 Text(item.marker).monospacedDigit().foregroundStyle(.secondary)
             }
         } else {
-            Text(item.level == 0 ? "•" : "◦").foregroundStyle(.secondary)
+            // Drawn only: VoiceOver read each one as "bullet" before the line.
+            Text(item.level == 0 ? "•" : "◦").foregroundStyle(.secondary).accessibilityHidden(true)
         }
     }
 }
@@ -450,20 +459,47 @@ struct MarkdownCode: View {
                         .foregroundStyle(.secondary)
                         .contentTransition(.symbolEffect(.replace))
                         .frame(minHeight: 32)
+                        // 44 points to the finger; the room is taken back from the layout, so nothing moves.
+                        .padding(6)
                         .contentShape(Rectangle())
+                        .padding(-6)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(copied ? "Copied" : "Copy code")
             }
             .padding(.leading, 12).padding(.trailing, 12)
-            ScrollView(.horizontal, showsIndicators: false) {
+            if Self.wraps(code) {
+                // Short lines wrap where they must: nothing is cut at the box's edge.
                 Text(code)
                     .font(.system(.footnote, design: .monospaced))
-                    .fixedSize(horizontal: true, vertical: true)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12).padding(.bottom, 12)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(code)
+                        .font(.system(.footnote, design: .monospaced))
+                        .fixedSize(horizontal: true, vertical: true)
+                        .padding(.horizontal, 12).padding(.bottom, 12)
+                }
+                // A long line fades out at the box's edge (and scrolls), instead of running into it.
+                .mask {
+                    HStack(spacing: 0) {
+                        Color.black
+                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 18)
+                    }
+                }
             }
         }
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.tertiarySystemFill)))
+    }
+
+    /// Short command lines wrap; code (indented, or with long lines) keeps its lines and scrolls sideways:
+    /// wrapped, `sizes="(max-width: 768px)` broke across two lines and lost its indentation.
+    static func wraps(_ code: String) -> Bool {
+        let lines = code.components(separatedBy: "\n")
+        let indented = lines.contains { $0.hasPrefix(" ") || $0.hasPrefix("\t") }
+        return !indented && (lines.map(\.count).max() ?? 0) <= 48
     }
 
     private func copy() {
@@ -507,6 +543,7 @@ struct MarkdownTable: View {
                     .font(bold ? Font.footnote.weight(.semibold) : Font.footnote)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(width: c < widths.count ? widths[c] : 80, alignment: .leading)
+                    .accessibilityAddTraits(bold ? .isHeader : [])
             }
         }
         .padding(.vertical, 8)

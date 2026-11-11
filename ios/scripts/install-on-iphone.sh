@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Builds and signs T3 Bot on another Mac over ssh and installs it on an iPhone paired with that Mac.
 # This is the headless route, for when the Mac that has Xcode and the iPhone is not the one you are typing
-# on. Most people do not need it: run ios/scripts/setup.sh, open ios/T3Bot.xcodeproj and press Run.
+# on. Most people do not need it: run ios/scripts/setup.sh, then open ios/T3Bot.xcodeproj and press Run, or
+# run ios/scripts/run-on-iphone.sh with the iPhone plugged into this Mac.
 #
 #   ios/scripts/install-on-iphone.sh [device UDID]
 #
@@ -41,7 +42,7 @@ CONFIG=${CONFIG:-Release}
 PRODUCTS="~/$REMOTE/build/Build/Products/$CONFIG-iphoneos"
 
 BUILD_HOST=$(setting T3BOT_BUILD_HOST)
-[[ -n $BUILD_HOST ]] || die "Set T3BOT_BUILD_HOST to the ssh name of the Mac that builds (or build from Xcode instead)."
+[[ -n $BUILD_HOST ]] || die "This script builds on another Mac over ssh, and T3BOT_BUILD_HOST (its ssh name) is not set. To build on this Mac for the iPhone plugged into it, run ios/scripts/run-on-iphone.sh, or open ios/T3Bot.xcodeproj in Xcode."
 ssh -o BatchMode=yes -o ConnectTimeout=8 "$BUILD_HOST" true 2>/dev/null \
   || die "Cannot reach $BUILD_HOST over ssh. Nothing was built."
 

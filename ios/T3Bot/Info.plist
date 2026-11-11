@@ -45,13 +45,13 @@
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Your bots read your calendar to plan around it, and can propose events you add yourself.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>T3 Bot uses the camera to scan the pairing code your Mac shows.</string>
+	<string>T3 Bot uses the camera to scan the pairing code T3 Code shows.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>Your bots look up who a draft message is for. Nothing is sent without you.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>T3 Bot asks for Face ID before an action you marked as needing it, such as a payment or a release.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>T3 Bot connects to your T3 Bot server when it is on the same network as this phone.</string>
+	<string>T3 Bot connects to T3 Code, or to your T3 Bot server, when it is on the same network as this phone.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>NSUserActivityTypes</key>
@@ -59,13 +59,19 @@
 		<string>INSendMessageIntent</string>
 	</array>
 	<key>T3BotAPNSEnv</key>
-	<string>sandbox</string>
+	<string>$(T3BOT_APNS_ENV)</string>
 	<key>T3BotKeychainGroup</key>
 	<string>$(AppIdentifierPrefix)$(T3BOT_BUNDLE_ID).shared</string>
+	<key>T3BotPushHost</key>
+	<string>$(T3BOT_PUSH_HOST)</string>
 	<key>T3BotToken</key>
 	<string>$(T3BOT_TOKEN)</string>
 	<key>T3BotURL</key>
 	<string>$(T3BOT_URL)</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

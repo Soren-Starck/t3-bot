@@ -1,236 +1,33 @@
 import Foundation
 
-// The T3 Bot server (server/t3bot.ts): the models it answers with and the calls the app makes.
-// Which server, and with which token, comes from Connection (ios/Shared/Connection.swift), read at call time,
-// so a new pairing works without a relaunch.
-
-struct Home: Codable {
-    let agents: [Agent]
-    let phoneShared: Bool?
-    let needs: [Card]
-    let badge: Int
-    let doneToday: Int
-    /// The id of the bot that leads (the server's `chief` setting). Older servers do not send it.
-    var chief: String? = nil
-    /// Whether the server can reach T3 Code, and what stops it when it cannot. Older servers do not send it.
-    var t3: T3State? = nil
-}
-
-/// The server's link to T3 Code, where the bots run: fine, or one plain sentence about what is wrong.
-struct T3State: Codable, Equatable {
-    var ok: Bool? = nil
-    var error: String? = nil
-}
-
-/// `GET /v1/hello`: who answers at this address. The connect screen checks a pairing with it and Settings
-/// shows the server's version.
-struct Hello: Codable, Equatable {
-    var ok: Bool? = nil
-    var name: String? = nil
-    var version: String? = nil
-    var user: String? = nil
-    var demo: Bool? = nil
-    /// Whether the server holds an APNs key, so pushes can reach this phone.
-    var push: Bool? = nil
-    /// How many bots the server has.
-    var bots: Int? = nil
-    var t3: T3State? = nil
-}
-
-struct Face: Codable, Hashable {
-    var skin: String
-}
-
-struct Skin: Codable, Hashable, Identifiable {
-    var id: String { n }
-    let n: String
-    let title: String
-    let series: String
-}
-
-struct SkinList: Codable { let skins: [Skin]; let used: [String?] }
-
-struct Agent: Codable, Identifiable, Hashable {
-    let id: String
-    let name: String
-    let role: String
-    let avatar: String
-    let kind: String
-    let face: Face
-    let hidden: Bool
-    let members: [String]
-    let threadId: String
-    let threadTitle: String
-    let t3Link: String?
-    let status: String
-    let mood: String?
-    let activity: String?
-    let lastReplyAt: String?
-    let needs: Int
-    let last: Last?
-    let watching: [String]
-    /// Its skin's main color (hex), for telling the bots apart in a group chat.
-    let color: String?
-}
-
-struct Last: Codable, Hashable {
-    let text: String
-    let at: String
-    let from: String
-}
-
-struct Card: Codable, Identifiable, Hashable {
-    let id: String
-    let source: String
-    let agent: String
-    let rank: Int
-    let title: String
-    let detail: String?
-    let why: String?
-    let steps: String?
-    let urgency: String?
-    let customer: Bool?
-    let minutes: Double?
-    let desk: String?
-    let deskName: String?
-    let key: String?
-    let at: String
-    let threadId: String?
-    let threadTitle: String?
-    let requestId: String?
-    let requestKind: String?
-    let questions: [Question]?
-    let kind: String?
-    let link: String?
-    let draft: Draft?
-    let fields: [CardField]?
-    let checks: [CardCheck]?
-    let edit: CardEdit?
-    let actions: [CardAction]?
-
-    var isQuestion: Bool { source == "question" }
-    var isApproval: Bool { isQuestion && requestKind == "command" }
-}
-
-/// The generic parts any card source can fill (see server/t3bot.ts, type Card).
-struct CardField: Codable, Hashable { let label: String; let value: String }
-struct CardCheck: Codable, Hashable { let label: String; let state: String }
-struct CardEdit: Codable, Hashable { let label: String; let text: String }
-struct CardAction: Codable, Hashable, Identifiable {
-    let id: String
-    let label: String
-    let kind: String
-    let style: String?
-    let faceId: Bool?
-}
-
-struct AppSettings: Codable, Equatable {
-    struct Quiet: Codable, Equatable { var enabled: Bool; var from: String; var to: String; var alarms: Bool }
-    struct Brief: Codable, Equatable { var enabled: Bool; var at: String; var agent: String }
-    var quiet: Quiet
-    var brief: Brief
-    var quickReplies: [String]
-}
-
-struct Draft: Codable, Hashable {
-    let to: String?
-    let text: String?
-    let via: String?
-    let subject: String?
-    let event: String?
-    let start: String?
-    let end: String?
-    let location: String?
-}
-
-struct Question: Codable, Hashable, Identifiable {
-    let id: String
-    let question: String
-    let header: String?
-    let multiSelect: Bool
-    let options: [Option]
-}
-
-struct Option: Codable, Hashable {
-    let label: String
-    let description: String?
-}
-
-struct Routine: Codable, Identifiable, Hashable {
-    let id: String
-    let title: String
-    var enabled: Bool
-    let when: String
-    let nextRunAt: String?
-    let lastRunAt: String?
-    let lastRunStatus: String?
-    let own: Bool
-}
-
-struct Timeline: Codable {
-    let agent: Agent
-    let routines: [Routine]
-    let entries: [Entry]
-    let working: Bool
-    let cards: [Card]
-    let runs: [RunInfo]
-    /// A group chat's members, live: who is answering right now.
-    let members: [Agent]?
-}
-
-struct Entry: Codable, Identifiable, Hashable {
-    let id: String
-    let type: String
-    let text: String
-    let at: String
-    let steps: [String]
-    let working: Bool?
-    var suggestions: [String]? = nil
-    var auto: Bool? = nil
-    var images: [EntryImage]? = nil
-
-    /// Automated traffic (a lane's TODO notice, the morning brief dump, a schedule): folded in the chat.
-    var isAutomatic: Bool { type == "auto" || auto == true }
-}
-
-struct RunInfo: Codable, Identifiable, Hashable {
-    var id: String { threadId }
-    let threadId: String
-    let title: String
-    let status: String
-    let at: String
-    let text: String
-}
-
-struct Note: Codable, Identifiable, Hashable {
-    let id: String
-    let agent: String
-    let kind: String
-    let title: String
-    let body: String?
-    let created_at: String
-}
-
-struct KnowList: Codable { let notes: [Note] }
-
-struct Reply: Codable {
-    let ok: Bool?
-    let error: String?
-    let agent: String?
-    var id: String? = nil
-    /// `v1/test-push`: how many devices the server sent to.
-    var devices: Int? = nil
-}
+// The calls the app makes, by path ("v1/home", "v1/agents/<id>/send"): to the T3 Bot server (server/t3bot.ts), or,
+// when the phone is paired with T3 Code itself, to DirectBackend through DirectRouter (ios/Direct), which answers the
+// same paths with the same models (ios/Direct/Sources/T3Direct/Models.swift). Which one, and with which token, comes
+// from Connection (ios/Shared/Connection.swift), read at call time, so a new pairing works without a relaunch.
 
 enum APIError: LocalizedError {
     case status(Int, String)
     case notPaired
+    /// From T3 Code directly: already a sentence for the person.
+    case message(String)
     var errorDescription: String? {
         switch self {
         case .status(401, _), .status(403, _): return "The server refused this token. Pair again in Settings."
         case let .status(code, body): return "Server answered \(code): \(body.prefix(200))"
         case .notPaired: return "Not connected to a server yet."
+        case let .message(m): return m
         }
+    }
+
+    /// A direct-mode failure in the app's terms: a refused token still reads as 401, so the app asks to pair again.
+    static func from(_ error: Error) -> Error {
+        if let e = error as? T3Error {
+            if e.isAuth { return APIError.status(401, e.localizedDescription) }
+            if case let .http(code, body) = e { return APIError.status(code, body) }
+            return APIError.message(e.localizedDescription)
+        }
+        if let u = error as? URLError { return APIError.message(T3Link.why(u, host: Connection.current?.label ?? "T3 Code")) }
+        return error
     }
 }
 
@@ -265,26 +62,119 @@ enum PairingError: LocalizedError, Equatable {
 enum API {
     /// Short timeouts: a tap must never hang. A VPN on the phone can take a few seconds to wake up,
     /// so callers retry once instead of waiting long.
-    static let session: URLSession = {
-        let c = URLSessionConfiguration.default
-        c.timeoutIntervalForRequest = 12
-        c.timeoutIntervalForResource = 20
-        c.waitsForConnectivity = false
-        c.httpMaximumConnectionsPerHost = 6
-        c.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: c)
-    }()
+    ///
+    /// The sessions are replaced after a failure, when the app comes back on screen and when the network changes
+    /// (`rebuildSessions`): a connection kept from before can be dead without the phone knowing (the server closed
+    /// it while the app slept, the VPN tunnel went away), and every request sent on it only times out.
+    static var session: URLSession { sessions.withLock { pair in Self.ready(&pair).quick } }
 
     /// For the two requests the server answers only once slow work is done (a new bot's thread and picture, an
     /// edit that draws a new picture): cut at 12 s, the app would say "failed" while the server carries on.
-    static let patient: URLSession = {
-        let c = URLSessionConfiguration.default
-        c.timeoutIntervalForRequest = 25
-        c.timeoutIntervalForResource = 30
-        c.waitsForConnectivity = false
-        c.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: c)
-    }()
+    static var patient: URLSession { sessions.withLock { pair in Self.ready(&pair).patient } }
+
+    private static let sessions = Locked<(quick: URLSession, patient: URLSession)?>(nil)
+
+    private static func ready(_ pair: inout (quick: URLSession, patient: URLSession)?) -> (quick: URLSession, patient: URLSession) {
+        if let pair { return pair }
+        let q = URLSessionConfiguration.default
+        q.timeoutIntervalForRequest = 12
+        q.timeoutIntervalForResource = 20
+        q.waitsForConnectivity = false
+        q.httpMaximumConnectionsPerHost = 6
+        q.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let p = URLSessionConfiguration.default
+        p.timeoutIntervalForRequest = 25
+        p.timeoutIntervalForResource = 30
+        p.waitsForConnectivity = false
+        p.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let made = (quick: URLSession(configuration: q), patient: URLSession(configuration: p))
+        pair = made
+        return made
+    }
+
+    /// New sessions, so new connections, for every request from now on. Requests already on their way finish on
+    /// the old ones (a message being sent is never cut).
+    static func rebuildSessions() {
+        let old = sessions.withLock { pair -> (quick: URLSession, patient: URLSession)? in
+            let was = pair
+            pair = nil
+            return was
+        }
+        guard let old else { return }
+        // Closed a minute later, not now: a caller that read `session` a moment ago may be about to start its
+        // request on it, and a session already closed would refuse it (URLSession raises an exception). Every
+        // request here ends within 30 s.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 60) {
+            old.quick.finishTasksAndInvalidate()
+            old.patient.finishTasksAndInvalidate()
+        }
+    }
+
+    /// Runs `op` and gives up after `seconds`, whatever it is waiting on: a call that hangs never holds its caller.
+    /// The work is cancelled when the time is up, and when the caller is cancelled.
+    static func within(_ seconds: TimeInterval, _ op: @escaping @Sendable () async throws -> Data) async throws -> Data {
+        let done = Locked(false)
+        let first: @Sendable () -> Bool = { done.withLock { was in defer { was = true }; return !was } }
+        let work = Locked<Task<Void, Never>?>(nil)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
+                let t = Task {
+                    do {
+                        let v = try await op()
+                        if first() { c.resume(returning: v) }
+                    } catch {
+                        if first() { c.resume(throwing: error) }
+                    }
+                }
+                work.withLock { $0 = t }
+                Task {
+                    try? await Task.sleep(for: .seconds(seconds))
+                    if first() {
+                        t.cancel()
+                        c.resume(throwing: URLError(.timedOut))
+                    }
+                }
+                if Task.isCancelled, first() {
+                    t.cancel()
+                    c.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            work.withLock { $0 }?.cancel()
+        }
+    }
+
+    /// True for a request that was stopped on purpose (the app left the screen, a newer try replaced it): not a
+    /// sign that the server is away.
+    static func wasCancelled(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let u = error as? URLError, u.code == .cancelled { return true }
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
+    }
+
+    /// Why a request failed, short enough for one line in Settings and with nothing secret in it (no token, no
+    /// request, only the server's name): "mac:8809 did not answer in time (timed out)".
+    static func reason(_ error: Error, _ c: Connection) -> String {
+        let host = c.label
+        if case let APIError.status(code, _) = error {
+            return code == 401 || code == 403 ? "\(host) refused this phone's token (answer \(code))" : "\(host) answered with an error (\(code))"
+        }
+        if case let APIError.message(m) = error { return String(m.prefix(160)) }
+        if error is DecodingError { return "\(host) answered with something this app version cannot read" }
+        guard let u = error as? URLError else { return "\(host) did not answer: \(String(error.localizedDescription.prefix(120)))" }
+        switch u.code {
+        case .timedOut: return "\(host) did not answer in time (timed out)"
+        case .notConnectedToInternet, .dataNotAllowed: return "This phone had no network"
+        case .cannotFindHost, .dnsLookupFailed: return "The name \(host) was not found (is Tailscale connected on this phone?)"
+        case .cannotConnectToHost: return "Nothing answered at \(host) (connection refused)"
+        case .networkConnectionLost: return "The connection to \(host) dropped"
+        case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
+            return "The secure connection to \(host) failed (code \(u.code.rawValue))"
+        case .appTransportSecurityRequiresSecureConnection: return "iOS blocked plain http to \(host)"
+        default: return "\(host) did not answer (network error \(u.code.rawValue))"
+        }
+    }
 
     /// The paired server, read each time. With no pairing the address resolves nowhere, so a stray call
     /// fails at once instead of reaching someone else's server.
@@ -324,15 +214,48 @@ enum API {
         return r
     }
 
-    static func get<T: Decodable>(_ path: String, as: T.Type = T.self) async throws -> T {
-        let (data, resp) = try await session.data(for: request(path))
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else { throw APIError.status(code, String(decoding: data, as: UTF8.self)) }
+    /// `timeout` caps the whole call, in both modes (Home's refresh uses it: a short first try, then a second one).
+    static func get<T: Decodable>(_ path: String, as: T.Type = T.self, timeout: TimeInterval? = nil) async throws -> T {
+        if let direct = DirectLink.current {
+            do {
+                let data: Data
+                if let timeout {
+                    data = try await within(timeout) { try await DirectRouter.get(direct, path) }
+                } else {
+                    data = try await DirectRouter.get(direct, path)
+                }
+                return try JSONDecoder().decode(T.self, from: data)
+            } catch {
+                if wasCancelled(error) { throw CancellationError() }
+                throw APIError.from(error)
+            }
+        }
+        var req = request(path)
+        let data: Data
+        if let timeout {
+            req.timeoutInterval = timeout
+            let r = req
+            let s = session
+            data = try await within(timeout) {
+                let (data, resp) = try await s.data(for: r)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                guard code == 200 else { throw APIError.status(code, String(decoding: data, as: UTF8.self)) }
+                return data
+            }
+        } else {
+            let (d, resp) = try await session.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            guard code == 200 else { throw APIError.status(code, String(decoding: d, as: UTF8.self)) }
+            data = d
+        }
         return try JSONDecoder().decode(T.self, from: data)
     }
 
     @discardableResult
     static func post(_ path: String, _ body: [String: Any] = [:], patient: Bool = false) async throws -> Reply {
+        if let direct = DirectLink.current {
+            do { return try await DirectRouter.post(direct, path, body) } catch { throw APIError.from(error) }
+        }
         var req = request(path, method: "POST", body: body)
         if patient { req.timeoutInterval = 25 }
         let (data, resp) = try await (patient ? self.patient : session).data(for: req)
@@ -347,6 +270,7 @@ enum API {
     /// Tells a server to stop pushing to this phone. Best effort, on the connection given, so it still reaches
     /// the old server while the app moves to another one. A server without the route answers 404, which is fine.
     static func forgetDevice(_ deviceToken: String, on c: Connection) {
+        guard !c.isDirect else { return }
         guard var r = c.request("v1/devices/remove", timeout: 6) else { return }
         r.httpMethod = "POST"
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -426,40 +350,3 @@ enum API {
         }
     }
 }
-
-// MARK: - Time
-
-enum Ago {
-    private static let iso: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-    private static let isoPlain = ISO8601DateFormatter()
-    private static let local: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd'T'HH:mm"
-        return f
-    }()
-
-    static func date(_ s: String) -> Date? {
-        iso.date(from: s) ?? isoPlain.date(from: s) ?? local.date(from: String(s.prefix(16)))
-    }
-
-    static func short(_ s: String) -> String {
-        guard let d = date(s) else { return "" }
-        let sec = Date().timeIntervalSince(d)
-        if sec < 60 { return "now" }
-        if sec < 3600 { return "\(Int(sec / 60))m" }
-        if sec < 86400 { return "\(Int(sec / 3600))h" }
-        return "\(Int(sec / 86400))d"
-    }
-
-    static func clock(_ s: String) -> String {
-        guard let d = date(s) else { return "" }
-        return d.formatted(Calendar.current.isDateInToday(d) ? .dateTime.hour().minute() : .dateTime.day().month().hour().minute())
-    }
-}
-
-struct EntryImage: Codable, Hashable { let path: String; let alt: String }

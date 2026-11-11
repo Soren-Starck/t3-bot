@@ -473,7 +473,8 @@ export function seed(base: number): World {
     },
     {
       id: 'req:demo-cmd-web', source: 'question', agent: 'web', rank: 0,
-      title: 'Approve: bun run deploy --prod --only pricing',
+      title: 'Put the new pricing page live',
+      detail: 'bun run deploy --prod --only pricing',
       at: at(26 * MIN), threadId: 'demo-thread-web-deploys', threadTitle: 'Website deploys', requestId: 'demo-cmd-web', requestKind: 'command', questions: [],
     },
     {

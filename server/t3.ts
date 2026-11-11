@@ -139,6 +139,8 @@ export type Question = { id: string; question: string; header?: string; multiSel
 export type Pending = {
   requestId: string; threadId: string; threadTitle: string; kind: 'user_input' | 'command'; createdAt: string
   questions: Question[]; command?: string
+  /** For an approval: what the agent says it wants to do, when it says it. */
+  description?: string
 }
 
 /** Every question or approval an agent is waiting on, in any thread of this server, that can still be answered. */
@@ -168,7 +170,8 @@ export function pendingRequests(maxAgeDays = 14): Pending[] {
     if (r.kind === 'user_input' && !questions.length) continue
     out.push({
       requestId: r.runtime_request_id, threadId: r.thread_id, threadTitle: r.title, kind: r.kind, createdAt: r.created_at,
-      questions, command: item?.command ?? item?.detail ?? item?.title ?? undefined,
+      questions, command: item?.prompt ?? item?.command ?? item?.detail ?? undefined,
+      description: [item?.reason, item?.title].find((x: unknown) => typeof x === 'string' && x.trim() && x !== (item?.prompt ?? item?.command)) ?? undefined,
     })
   }
   return out
@@ -237,9 +240,17 @@ async function sessionToken(): Promise<string> {
     const cli = cliPath()
     if (!cli) throw new Error('the `t3` command of T3 Code was not found (is T3 Code installed? T3BOT_T3_CLI can point at it)')
     const p = Bun.spawn([cli, 'auth', 'session', 'issue', '--ttl', '12h', '--label', 't3bot', '--json'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
-    const timer = setTimeout(() => { try { p.kill() } catch {} }, 15000)
-    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited])
-    clearTimeout(timer)
+    // Stopped after 15 seconds. A child of the command can keep its pipes open after the kill, and every write to
+    // T3 Code waits on this one promise: so it gives up by itself instead of waiting for the pipes to close.
+    let giveUp: ReturnType<typeof setTimeout> | undefined
+    const timer = setTimeout(() => { try { p.kill(9) } catch {} }, 15000)
+    const done = await Promise.race([
+      Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]),
+      new Promise<null>((r) => { giveUp = setTimeout(() => r(null), 17000) }),
+    ])
+    clearTimeout(timer); clearTimeout(giveUp)
+    if (!done) throw new Error('T3 Code did not issue a session in 15 seconds (is it starting up?)')
+    const [out, err, code] = done
     const token = String(parse(out).token ?? '')
     if (code !== 0 || !token) throw new Error(`T3 Code did not issue a session (${(err || out).trim().slice(0, 200) || `exit ${code}`})`)
     session = { token, until: Date.now() + 11 * 3600e3 }
@@ -316,8 +327,9 @@ export async function dispatch(command: Record<string, unknown>): Promise<{ ok: 
   return r.ok ? { ok: true } : { ok: false, error: r.error }
 }
 
-export async function sendMessage(threadId: string, text: string) {
-  const id = crypto.randomUUID()
+/** `clientId` is the app's own id for this message: a retry with the same id is the same message to T3 Code. */
+export async function sendMessage(threadId: string, text: string, clientId?: string) {
+  const id = clientId && /^[A-Za-z0-9-]{8,64}$/.test(clientId) ? clientId.toLowerCase() : crypto.randomUUID()
   const mode = isActive(lastRunStatus(threadId)) ? { type: 'queue_after_active' } : { type: 'start_immediately' }
   return dispatch({
     type: 'message.dispatch', createdBy: 'user', creationSource: 'mobile',

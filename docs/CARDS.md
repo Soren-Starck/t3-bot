@@ -15,7 +15,9 @@ Cards come from three places:
 | A note | Someone runs `t3bot notify` | "Deploy 2.4.1 to production?" |
 | A source | A command of yours that prints a list as JSON, run on a timer | Your to-do list, open pull requests, support tickets |
 
-You do nothing for the first kind. This page covers the other two.
+You do nothing for the first kind, and it works with either pairing: straight with T3 Code, or through the T3 Bot server.
+
+The other two kinds need the [optional server](SETUP.md#optional-the-t3-bot-server), and so do [handlers](#handlers) and [drafts](#drafts-for-your-phone): the `t3bot` command talks to the server, and an app paired straight with T3 Code shows none of them. The rest of this page is about them.
 
 ## Notes: `t3bot notify`
 

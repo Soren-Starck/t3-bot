@@ -74,7 +74,7 @@ export function oneLine(s: string): string {
     if (!inCode && TABLE_RULE.test(raw)) continue
     const isRow = !inCode && /^\s*\|/.test(raw)
     const isItem = !inCode && LIST_ITEM.test(raw)
-    const line = (inCode ? raw : (isRow ? raw.replace(/^\s*\|/, '').replace(/\|\s*$/, '').replace(/\s*\|\s*/g, ' ') : raw)
+    const line = (inCode ? raw : (isRow ? tableRow(raw) : raw)
       .replace(LIST_ITEM, '')
       .replace(/^\s*#{1,6}\s+/, '')
       .replace(/^\s*>\s?/, '')
@@ -101,6 +101,12 @@ export function oneLine(s: string): string {
  * What a search result shows of a message: the words around the first match, starting and ending on a whole
  * word, with an ellipsis at each end that was cut.
  */
+/** A table row in words: its first cell, a colon, the other cells with commas ("Page weight: 2.6 MB, 610 KB"). */
+function tableRow(raw: string): string {
+  const cells = raw.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split(/\s*\|\s*/).map((c) => c.trim()).filter(Boolean)
+  return cells.length > 1 ? `${cells[0]}: ${cells.slice(1).join(', ')}` : (cells[0] ?? '')
+}
+
 export function snippet(text: string, query: string, max = 200): string {
   const flat = oneLine(text)
   if (flat.length <= max) return flat

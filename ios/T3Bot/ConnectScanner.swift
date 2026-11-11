@@ -2,10 +2,10 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-/// The camera, looking for the QR code `t3bot pair` shows. It only accepts a pairing link
-/// (t3bot://connect?url=...&token=...) and says so when it sees another code.
+/// The camera, looking for a pairing QR code: T3 Code's own (Settings > Sharing & access > Create link, or
+/// `t3 pair`) or a T3 Bot server's (`t3bot pair`). It says so when it sees another code.
 struct ConnectScanner: View {
-    var onFound: (Connection) -> Void
+    var onFound: (PairTarget) -> Void
     @StateObject private var model = ScannerModel()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -23,14 +23,14 @@ struct ConnectScanner: View {
                 case .denied:
                     message(symbol: "camera.fill",
                             title: "The camera is off for T3 Bot",
-                            text: "Allow the camera in Settings to scan the code, or go back and paste the pairing link.",
+                            text: "Allow the camera in Settings to scan the code, or go back and paste the link.",
                             button: "Open Settings") {
                         if let u = URL(string: UIApplication.openSettingsURLString) { openURL(u) }
                     }
                 case .noCamera:
                     message(symbol: "camera.fill",
                             title: "No camera here",
-                            text: "This device has no camera to scan with. Go back and paste the pairing link, or type the address and the token.",
+                            text: "This device has no camera to scan with. Go back and paste the link, or type the address and the code.",
                             button: nil) {}
                 }
             }
@@ -61,8 +61,8 @@ struct ConnectScanner: View {
                 .frame(width: 240, height: 240)
                 .accessibilityHidden(true)
             Text(model.wrongCode
-                 ? "That code is not a T3 Bot pairing code. Scan the one t3bot pair shows on your Mac."
-                 : "Run t3bot pair on your Mac and point the camera at the code.")
+                 ? "That is not a pairing code. In T3 Code, open Settings > Sharing & access and create a link."
+                 : "Point the camera at the pairing code T3 Code shows.")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
@@ -70,6 +70,12 @@ struct ConnectScanner: View {
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.55)))
                 .padding(.horizontal, 24)
                 .animation(.easeInOut(duration: 0.2), value: model.wrongCode)
+                // Said aloud too: with VoiceOver nothing else tells that the camera read the wrong kind of code.
+                .onChange(of: model.wrongCode) { _, wrong in
+                    if wrong, UIAccessibility.isVoiceOverRunning {
+                        AccessibilityNotification.Announcement("That is not a pairing code").post()
+                    }
+                }
             Spacer()
             Spacer()
         }
@@ -77,7 +83,7 @@ struct ConnectScanner: View {
 
     private func message(symbol: String, title: String, text: String, button: String?, action: @escaping () -> Void) -> some View {
         VStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 34)).foregroundStyle(.white.opacity(0.7))
+            Image(systemName: symbol).font(.system(size: 34)).foregroundStyle(.white.opacity(0.7)).accessibilityHidden(true)
             Text(title).font(.headline).foregroundStyle(.white)
             Text(text)
                 .font(.subheadline)
@@ -104,7 +110,7 @@ final class ScannerModel: NSObject, ObservableObject, AVCaptureMetadataOutputObj
     @Published var state: State = .asking
     /// A QR code was read, but it is not a pairing link.
     @Published var wrongCode = false
-    var onFound: ((Connection) -> Void)?
+    var onFound: ((PairTarget) -> Void)?
 
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "t3bot.scanner")
@@ -168,7 +174,7 @@ final class ScannerModel: NSObject, ObservableObject, AVCaptureMetadataOutputObj
 
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !found, let text = (metadataObjects.first as? AVMetadataMachineReadableCodeObject)?.stringValue else { return }
-        if let c = Connection.parse(link: text) {
+        if let c = PairTarget.from(text) {
             found = true
             stop()
             onFound?(c)

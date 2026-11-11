@@ -15,7 +15,8 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { dirname, join } from 'path'
 import * as t3 from './t3'
 import { push, pushLive, type Alert, type Device, type Env } from './push'
-import { oneLineCommand, plain, preview, quickReplies, snippet } from './text'
+import { clip, oneLineCommand, plain, preview, quickReplies, snippet } from './text'
+import { BadInput, inQuiet, minutesSince, overLimit, readBody, storedNote, tidyNote, tooLarge, wrongMethod } from './guard'
 import {
   DATA_DIR as DATA, HOME, PORT, ROOT, TOKEN_FILE, VERSION, apnsConfigured, botNotesPath, chiefId, configPath, expandArgv, isHHMM,
   keepDays, loadConfig, rulesPath, saveConfig, threadDefaults, tilde, userInPrompt, userName, type AgentConf, type Config, type SourceConf,
@@ -422,29 +423,30 @@ function agentForThread(threadId: string, title: string): string {
 function questionCards(): Card[] {
   return t3.pendingRequests().map((r) => ({
     id: `req:${r.requestId}`, source: 'question' as const, agent: agentForThread(r.threadId, r.threadTitle), rank: 0,
-    title: r.kind === 'command' ? `Approve: ${oneLineCommand(r.command ?? 'a command', 120)}` : r.questions[0]?.question ?? 'A question',
-    detail: r.questions.length > 1 ? `${r.questions.length} questions` : undefined,
+    // An approval reads as what the agent wants to do, in its words; the command itself is the detail.
+    title: r.kind === 'command' ? (r.description ? clip(r.description, 140) : 'Run a command') : r.questions[0]?.question ?? 'A question',
+    detail: r.kind === 'command' ? (r.command ? clip(r.command, 600) : undefined) : r.questions.length > 1 ? `${r.questions.length} questions` : undefined,
     at: r.createdAt, threadId: r.threadId, threadTitle: r.threadTitle, requestId: r.requestId, requestKind: r.kind, questions: r.questions,
   }))
 }
 
 function noteCards(): Card[] {
   const rows = db.query(`select * from notes where read_at is null and kind in ('alarm','approve','do','draft') order by created_at`).all() as any[]
-  return rows.map((n) => {
-    let data: any = {}
-    try { data = (n.data ? JSON.parse(n.data) : {}) ?? {} } catch {}
-    const isPhoneDraft = n.kind === 'draft'
-    return {
+  // Each row goes through storedNote (guard.ts): a note saved before today's checks still reaches the app in the shape it decodes.
+  return rows.flatMap((row) => {
+    const n = storedNote(row)
+    if (!n) return []
+    return [{
       id: `note:${n.id}`, source: 'note' as const, agent: n.agent, rank: n.kind === 'alarm' ? 0 : n.kind === 'do' ? 2 : 1,
-      title: n.title, detail: n.body ?? undefined, at: n.created_at, kind: n.kind, link: n.link ?? undefined, key: n.key ?? undefined,
-      draft: isPhoneDraft ? data : undefined,
-      fields: data.fields, checks: data.checks, edit: data.edit,
-      actions: isPhoneDraft ? undefined : (data.actions?.length ? data.actions : [
-        { id: 'handle', label: 'Handle it', kind: 'handle', style: 'primary', faceId: !!data.faceId },
+      title: n.title, detail: n.body, at: n.created_at, kind: n.kind, link: n.link, key: n.key,
+      draft: n.draft,
+      fields: n.fields, checks: n.checks, edit: n.edit,
+      actions: n.draft ? undefined : (n.actions ?? [
+        { id: 'handle', label: 'Handle it', kind: 'handle', style: 'primary', faceId: n.faceId },
         { id: 'done', label: 'Done', kind: 'done' },
         { id: 'snooze', label: 'Not now', kind: 'snooze' },
       ]),
-    }
+    }]
   })
 }
 
@@ -622,7 +624,7 @@ async function cardAction(id: string, action: string, body: any): Promise<{ ok: 
     if (card.source === 'desk') {
       const src = cfg().sources.find((x) => x.id === (card as any).srcId)
       if (!src?.done?.length) return { ok: false, error: 'this source cannot mark cards done' }
-      const r = await inTurn(() => run(expandArgv(src.done).map((x) => x.replace('{id}', String((card as any).local))), { timeout: Number(src.timeout) > 0 ? Number(src.timeout) : 30 }))
+      const r = await inTurn(() => run(expandArgv(src.done).map((x) => x.replace('{id}', () => String((card as any).local))), { timeout: Number(src.timeout) > 0 ? Number(src.timeout) : 30 }))
       record('done', { id, rc: r.code })
       if (r.code !== 0) return { ok: false, error: (r.err.trim() || r.out.trim()).slice(-300) || 'the source could not mark it done' }
       // Gone from the list at once, then the source is read again so the app sees what it says now.
@@ -697,8 +699,8 @@ async function act(id: string, actionId: string, body: any): Promise<{ ok: boole
  * A message to a bot's thread. When T3 Code refuses it, the answer says why in words the app can show: the thread
  * was deleted, or T3 Code is not running.
  */
-async function sendTo(a: AgentConf, text: string): Promise<{ ok: boolean; error?: string }> {
-  const r = await t3.sendMessage(a.threadId, text)
+async function sendTo(a: AgentConf, text: string, clientId?: string): Promise<{ ok: boolean; error?: string }> {
+  const r = await t3.sendMessage(a.threadId, text, clientId)
   if (r.ok) return r
   if (t3.READONLY) return r
   const problem = t3.status().problem
@@ -768,31 +770,26 @@ function saveSettings(b: any) {
 
 // ---------- notes from agents ----------
 
-function addNote(n: any) {
-  const kind = String(n.kind ?? 'know')
-  if (!['alarm', 'approve', 'do', 'know', 'draft'].includes(kind)) throw new Bad('kind must be alarm, approve, do, know or draft')
-  const title = textOf(n.title, 300)
-  if (!title) throw new Bad('title is required')
-  n = { ...n, title, body: textOf(n.body, 8000) || undefined, link: textOf(n.link, 2000) || undefined, key: textOf(n.key, 200) || undefined }
-  const agent = agentById(String(n.agent ?? '')) ? String(n.agent) : chiefOrNone()
+function addNote(raw: any) {
+  // Kind and title checked, every text a string of a bounded length (guard.ts): the app reads these as they are.
+  const n = tidyNote(raw), kind = n.kind
+  const agent = agentById(n.agent) ? n.agent : chiefOrNone()
   const id = n.key ? `${agent}:${n.key}` : crypto.randomUUID()
-  const pairs = (x: unknown, a: string, b: string) => (Array.isArray(x)
-    ? x.filter((f) => f && typeof f === 'object').map((f: any) => ({ [a]: String(f[a] ?? ''), [b]: String(f[b] ?? '') })).slice(0, 40) : undefined)
-  const data = kind === 'draft' ? JSON.stringify(n.draft && typeof n.draft === 'object' ? n.draft : {})
+  const data = kind === 'draft' ? JSON.stringify(n.draft)
     : JSON.stringify({
-      fields: pairs(n.fields, 'label', 'value'),
-      checks: pairs(n.checks, 'label', 'state'),
-      edit: n.edit?.text !== undefined ? { label: String(n.edit.label ?? 'Text'), text: String(n.edit.text) } : undefined,
-      actions: Array.isArray(n.actions) ? n.actions.filter((a: any) => a && typeof a === 'object' && a.label).slice(0, 6).map((a: any, i: number) => ({
-        id: String(a.id ?? `a${i}`), label: String(a.label), kind: a.handler ? 'command' : 'message', style: i === 0 ? 'primary' : 'plain',
-        faceId: !!(a.faceId ?? n.faceId), message: a.message ? String(a.message) : undefined, handler: a.handler ? String(a.handler) : undefined,
-      })).concat([{ id: 'done', label: 'Done', kind: 'done' }, { id: 'snooze', label: 'Not now', kind: 'snooze' }]) : undefined,
-      faceId: !!n.faceId,
+      fields: n.fields,
+      checks: n.checks,
+      edit: n.edit,
+      actions: n.actions ? n.actions.map((a, i) => ({
+        id: a.id, label: a.label, kind: a.handler ? 'command' : 'message', style: i === 0 ? 'primary' : 'plain',
+        faceId: !!(a.faceId ?? n.faceId), message: a.message, handler: a.handler,
+      })).concat([{ id: 'done', label: 'Done', kind: 'done' }, { id: 'snooze', label: 'Not now', kind: 'snooze' }] as any) : undefined,
+      faceId: n.faceId,
     })
   db.query(`insert into notes (id, agent, kind, title, body, link, key, created_at, data) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
             on conflict(id) do update set kind = excluded.kind, title = excluded.title, body = excluded.body, link = excluded.link,
               data = excluded.data, read_at = null, pushed_at = null`)
-    .run(id, agent, kind, String(n.title), n.body ? String(n.body) : null, n.link ? String(n.link) : null, n.key ? String(n.key) : null, now(), data)
+    .run(id, agent, kind, n.title, n.body ?? null, n.link ?? null, n.key ?? null, now(), data)
   return { id, agent, kind }
 }
 
@@ -953,9 +950,7 @@ const hm = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 
 function isNight(d = new Date()) {
   const q = settings().quiet
   if (!q.enabled) return false
-  const { from, to } = q
-  const t = d.getHours() * 60 + d.getMinutes()
-  return hm(from) > hm(to) ? t >= hm(from) || t < hm(to) : t >= hm(from) && t < hm(to)
+  return inQuiet(q.from, q.to, d.getHours() * 60 + d.getMinutes())
 }
 function dayStart() { const d = new Date(); d.setHours(0, 0, 0, 0); return d.toISOString() }
 /** The day as the person lives it (local time), for the things that happen once a day. */
@@ -1156,9 +1151,12 @@ async function loop() {
     const bot = agentById(b.agent)
     if (!b.enabled || !bot?.threadId || t3.READONLY) return
     const at = b.at === 'quiet-end' ? settings().quiet.to : b.at
-    const d0 = new Date(), mins = d0.getHours() * 60 + d0.getMinutes()
-    const key = `brief:${localDay(d0)}`
-    if (mins < hm(at) || mins >= hm(at) + 180 || seen(key)) return
+    // Asked within three hours of its time, once per day. The day is the one the window began on, so a brief
+    // set late in the evening is still asked after midnight, and only once.
+    const d0 = new Date(), since = minutesSince(at, d0.getHours() * 60 + d0.getMinutes())
+    if (since < 0 || since >= 180) return
+    const key = `brief:${localDay(new Date(d0.getTime() - since * 60e3))}`
+    if (seen(key)) return
     markSeen(key)
     const who = person()
     const r = await t3.sendSystem(bot.threadId, `From T3 Bot: ${who}'s morning brief. In at most 5 short lines: the 3 things that need ${who} most today ` +
@@ -1236,7 +1234,7 @@ async function tick() {
 
 // ---------- http ----------
 
-const json = (x: unknown, status = 200) => new Response(JSON.stringify(x), { status, headers: { 'content-type': 'application/json' } })
+const json = (x: unknown, status = 200, more: Record<string, string> = {}) => new Response(JSON.stringify(x), { status, headers: { 'content-type': 'application/json', ...more } })
 
 /** Home and chats are fetched every few seconds from the phone: compressed, they are a fraction of the size. */
 async function gz(req: Request, res: Response): Promise<Response> {
@@ -1267,6 +1265,11 @@ try {
       const url = new URL(req.url)
       const path = url.pathname
       if (path === '/health') return json({ ok: true })
+      // Faces are served without the token, on purpose. The app, its widgets and its notification extension send
+      // the token with these requests, but the share extension shows each bot's face with SwiftUI's AsyncImage
+      // (ios/T3BotShare/ShareViewController.swift, `remote`), which loads a plain URL and cannot carry a header.
+      // Asking for the token here would leave the share sheet without faces. What is open is a PNG per bot id
+      // and per stock skin, nothing else: no names, no messages, and the path only takes [a-z0-9-].
       const av = path.match(/^\/v1\/avatars\/((?:skins\/)?[a-z0-9-]+)\.png$/)
       if (av) {
         const f = avatarFile(av[1])
@@ -1275,13 +1278,14 @@ try {
       if (!authorized(req)) return json({ error: 'unauthorized' }, 401)
       if (req.method !== 'POST') return gz(req, await route(req, url, path, {}))
       // An empty body is an empty object; anything else must be a JSON object.
-      let body: any = {}
+      // Each route reads no more than it needs (guard.ts): only the ones that carry photos take megabytes.
+      if (overLimit(path, req.headers.get('content-length'))) return json({ ok: false, error: tooLarge(path) }, 413)
       let raw = ''
       try { raw = await req.text() } catch { return json({ ok: false, error: 'the request could not be read (too large?)' }, 413) }
-      if (raw.trim()) {
-        try { body = JSON.parse(raw) } catch { return json({ ok: false, error: 'the body is not valid JSON' }, 400) }
-        if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ ok: false, error: 'the body must be a JSON object' }, 400)
-      }
+      if (overLimit(path, null, raw.length)) return json({ ok: false, error: tooLarge(path) }, 413)
+      const read = readBody(raw)
+      if (read.error !== undefined) return json({ ok: false, error: read.error }, 400)
+      const body: any = read.body
       const started = performance.now()
       const res = await route(req, url, path, body)
       log('action', { path, status: res.status, ms: Math.round(performance.now() - started) })
@@ -1322,7 +1326,10 @@ async function route(req: Request, url: URL, path: string, body: any): Promise<R
       const images = Array.isArray(body.images) ? saveImages(body.images) : []
       const text = [textOf(body.text), ...images.map(imageLine)].filter(Boolean).join('\n\n')
       if (!text) return json({ ok: false, error: 'empty message' }, 400)
-      const r = await sendTo(a, text)
+      // A retry from the phone carries the same clientId: T3 Code keeps one message per id, so it is never posted twice.
+      const r = await sendTo(a, text, textOf(body.clientId, 64) || undefined)
+      // The first try did reach T3 Code: the message is already there, which is what the phone wanted.
+      if (!r.ok && /already|duplicate/i.test(r.error ?? '')) { record('send', { agent: a.id, ok: true, retry: true }); return json({ ok: true }) }
       record('send', { agent: a.id, ok: r.ok })
       return json(r, r.ok ? 200 : 502)
     }
@@ -1453,16 +1460,21 @@ async function route(req: Request, url: URL, path: string, body: any): Promise<R
       }
     }
     if (path === '/v1/know' && GET) {
-      return json({ notes: db.query(`select * from notes where kind = 'know' and created_at > ? order by created_at desc`).all(dayStart()) })
+      const rows = db.query(`select * from notes where kind = 'know' and created_at > ? order by created_at desc`).all(dayStart()) as any[]
+      // The same reading as the cards: the app decodes id, agent, kind, title, body and created_at as text.
+      return json({ notes: rows.flatMap((row) => { const n = storedNote(row); return n ? [{ ...row, id: n.id, agent: n.agent, kind: n.kind, title: n.title, body: n.body ?? null, created_at: n.created_at }] : [] }) })
     }
     if (path === '/v1/test-push' && POST) {
       await send({ title: textOf(body.title, 200) || 'T3 Bot', body: textOf(body.body, 1000) || 'Push works.', category: 'REPLY',
         data: { agent: agentById(String(body.agent ?? ''))?.id ?? chiefOrNone() } }, { night: 'ring' })
       return json({ ok: true, devices: devices().length, push: !NO_PUSH && apnsConfigured() })
     }
+    // A path that exists, asked with a method it does not take: 405 and the methods it does take.
+    const allow = wrongMethod(path, req.method)
+    if (allow) return json({ ok: false, error: `${path} takes ${allow.replace(', ', ' or ')}, not ${req.method}` }, 405, { allow })
     return json({ error: 'not found' }, 404)
   } catch (e) {
-    if (e instanceof Bad) return json({ ok: false, error: e.message }, 400)
+    if (e instanceof Bad || e instanceof BadInput) return json({ ok: false, error: e.message }, 400)
     log('request error', { path, e: String((e as any)?.stack ?? e).slice(0, 400) })
     // A read of T3 Code that failed says so in plain words; anything else is a fault of this server.
     return json({ ok: false, error: e instanceof t3.ReadError ? e.message : `T3 Bot hit an error (${reason(e)}). The server log has the details.` }, 500)

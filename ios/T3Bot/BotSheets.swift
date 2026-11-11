@@ -38,24 +38,41 @@ struct EditBotSheet: View {
                         Spacer()
                         // The face at rest, as in New bot: this is where the skin is chosen. A bot that is
                         // writing shows a blinking caret instead of eyes, which hides half of what a skin changes.
-                        LiveFace(face: Face(skin: skin.isEmpty ? agent.face.skin : skin), size: 120)
+                        LiveFace(face: Face(skin: skin.isEmpty ? agent.face.skin : skin), size: 120, blinks: false)
                             .frame(width: 120, height: 120)
                             .accessibilityHidden(true)
                         Spacer()
                     }
                     .listRowBackground(Color.clear)
                 }
-                Section("Face") { SkinRow(selection: $skin) }
-                Section("Name") {
+                // The faces right here, as in New bot, instead of a row that opens a list.
+                Section {
+                    SkinStrip(selection: $skin, suggested: agent.face.skin)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                } header: { ListHeader(text: "Face") }
+                Section {
                     TextField("Name", text: $name)
                         .textInputAutocapitalization(.words)
                         .submitLabel(.done)
+                } header: { ListHeader(text: "Name") }
+                Section {
                     TextField("One line under its name", text: $role, axis: .vertical).lineLimit(1...3)
-                }
+                        // A rounded rectangle, not the row's capsule: wrapped text crowded its round ends.
+                        .padding(.horizontal, 16).padding(.vertical, 12)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
+                } header: { ListHeader(text: "Role") }
                 Section {
                     TextField("Tell it what it should do from now on", text: $job, axis: .vertical).lineLimit(2...8)
+                        // A rounded rectangle, not the row's capsule: wrapped text crowded its round ends.
+                        .padding(.horizontal, 16).padding(.vertical, 12)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
                 } header: {
-                    Text("What it does")
+                    ListHeader(text: "New instruction")
                 } footer: {
                     Text("Sent to \(agent.name) in its thread; it updates its own instructions so the change lasts.")
                 }
@@ -83,7 +100,7 @@ struct EditBotSheet: View {
                             }
                         }
                     } header: {
-                        Text("Routines")
+                        ListHeader(text: "Routines")
                     } footer: {
                         Text("These are T3 scheduled tasks. To add one, ask \(agent.name) in the chat, for example \"every Sunday at 18:00, tell me...\".")
                     }
@@ -203,8 +220,15 @@ struct NewBotSheet: View {
     @State private var members: Set<String> = []
     @State private var loaded = false
     @State private var error: String?
+    @FocusState private var field: Field?
+    enum Field { case name, job }
 
     private static let most = 6
+    /// Typing a name or a job: the face looks like it is writing it down.
+    private var typing: Bool { field != nil && !(field == .name ? cleanName : cleanJob).isEmpty }
+    /// A face no other bot wears, shown until one is picked (and what the bot gets if none is).
+    private var suggested: String { BotBook.freeSkin(used: (store.home?.agents ?? []).map(\.face.skin)) }
+    private var shownSkin: String { skin.isEmpty ? suggested : skin }
     private var bots: [Agent] { store.home?.agents.filter { $0.kind != "group" } ?? [] }
     private var cleanName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var cleanJob: String { job.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -220,31 +244,43 @@ struct NewBotSheet: View {
                 .labelsHidden()
                 .listRowBackground(Color.clear)
                 if kind == "bot" {
+                    // The bot appears as it is made: its face, alive, with its name under it as you type.
                     Section {
-                        if !skin.isEmpty {
-                            HStack {
-                                Spacer()
-                                LiveFace(face: Face(skin: skin), size: 96).frame(width: 96, height: 96)
-                                    .accessibilityHidden(true)
-                                Spacer()
-                            }
+                        // The name is typed once, in its field; the face watches you type it.
+                        // Large enough to be the bot, small enough that the fields sit above the Create bar.
+                        LiveFace(face: Face(skin: shownSkin), size: 76, state: typing ? .typing : .idle, blinks: false)
+                            .frame(width: 76, height: 76)
+                            .id(shownSkin)
+                            .transition(.scale(scale: 0.8).combined(with: .opacity))
+                            .frame(maxWidth: .infinity)
+                            .animation(.spring(duration: 0.35, bounce: 0.3), value: shownSkin)
+                            .accessibilityHidden(true)
                             .listRowBackground(Color.clear)
-                        }
-                        SkinRow(selection: $skin, allowsAutomatic: true)
-                    } footer: {
-                        if skin.isEmpty { Text("Leave it and T3 Bot picks a skin no other bot looks like.") }
-                    }
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 4, trailing: 0))
+                        SkinStrip(selection: $skin, suggested: suggested)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    } header: { ListHeader(text: "Face") }
                 }
-                Section("Name") {
+                Section {
                     TextField(kind == "bot" ? "e.g. Research" : "e.g. Launch week", text: $name)
                         .textInputAutocapitalization(.words)
                         .submitLabel(.done)
-                }
+                        .focused($field, equals: .name)
+                } header: { ListHeader(text: "Name") }
                 Section {
                     TextField(kind == "bot" ? "e.g. Watches my inbox and tells me what needs a reply" : "Optional", text: $job, axis: .vertical)
                         .lineLimit(2...6)
+                        .focused($field, equals: .job)
+                        // A rounded rectangle, not the row's capsule: wrapped text crowded its round ends.
+                        .padding(.horizontal, 16).padding(.vertical, 12)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
                 } header: {
-                    Text(kind == "bot" ? "What it does" : "What the group is for")
+                    ListHeader(text: kind == "bot" ? "What it does" : "What the group is for")
                 } footer: {
                     if kind == "bot" { Text("Its first instructions. You can change them later from its chat.") }
                 }
@@ -268,11 +304,30 @@ struct NewBotSheet: View {
                 if let error { Section { Text(error).foregroundStyle(.red).font(.footnote) } }
             }
             .scrollDismissesKeyboard(.interactively)
+            // The Bot / Group chat switch right under the title, not a band lower; the last hint clears Create.
+            .contentMargins(.top, 4, for: .scrollContent)
+            .contentMargins(.bottom, 28, for: .scrollContent)
+            // Create within thumb reach, on its own bar: the form scrolls under it, never through it.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Button { create() } label: {
+                    // Says what is missing while it cannot create.
+                    Text(ready ? (kind == "bot" ? "Create bot" : "Create group")
+                         : cleanName.isEmpty ? "Add a name to create"
+                         : kind == "bot" ? "Say what it does to create" : "Pick at least two bots")
+                        .frame(maxWidth: .infinity)
+                }
+                    .mainButton()
+                    .controlSize(.large)
+                    .disabled(!ready)
+                    .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 8)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(.systemGroupedBackground).ignoresSafeArea(edges: .bottom))
+                    .overlay(alignment: .top) { Divider().opacity(0.5) }
+            }
             .navigationTitle(kind == "bot" ? "New bot" : "New group")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Create") { create() }.disabled(!ready) }
             }
             .onAppear {
                 guard !loaded else { return }
@@ -297,7 +352,7 @@ struct NewBotSheet: View {
         let name = cleanName
         let kept = NewBotStash.Kept(kind: kind, name: name, job: cleanJob, skin: skin, members: members, reason: "")
         var body: [String: Any] = ["kind": kind, "name": name, "job": cleanJob]
-        if kind == "group" { body["members"] = Array(members) } else if !skin.isEmpty { body["face"] = ["skin": skin] }
+        if kind == "group" { body["members"] = Array(members) } else { body["face"] = ["skin": shownSkin] }
         let store = self.store
         let server = Connection.current?.url
         let before = Set(store.home?.agents.map(\.id) ?? [])
@@ -371,14 +426,15 @@ struct SkinRow: View {
             SkinPicker(selection: $selection, allowsAutomatic: allowsAutomatic)
         } label: {
             HStack {
-                Text("Skin")
+                Text("Look")
                 Spacer()
                 if !selection.isEmpty {
-                    StoredImage(key: "skin:\(selection)", path: "v1/avatars/skins/\(selection).png") { Color.clear }
+                    StoredImage(key: "skin:\(selection)", path: "skin:\(selection)") { Color.clear }
                         .frame(width: 28, height: 28)
                         .accessibilityHidden(true)
                 }
-                Text(selection.isEmpty ? (allowsAutomatic ? "Automatic" : "Choose") : title)
+                // The colour in plain words ("Blue"), not the series name ("Glaze · Blue").
+                Text(selection.isEmpty ? (allowsAutomatic ? "Automatic" : "Choose") : (title.components(separatedBy: " · ").last ?? title))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -493,7 +549,7 @@ struct SkinPicker: View {
                     dismiss()
                 } label: {
                     VStack(spacing: 4) {
-                        StoredImage(key: "skin:\(s.n)", path: "v1/avatars/skins/\(s.n).png") {
+                        StoredImage(key: "skin:\(s.n)", path: "skin:\(s.n)") {
                             Color(.secondarySystemFill).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .frame(width: 64, height: 64)
@@ -522,6 +578,68 @@ struct SkinPicker: View {
             used = Set(l.used.compactMap { $0 })
         } else if skins.isEmpty {
             failed = true
+        }
+    }
+}
+
+/// A row of faces to pick from, right under the preview: a dozen that read well small, the suggested one first,
+/// and More for all of them.
+struct SkinStrip: View {
+    @Binding var selection: String
+    let suggested: String
+    @State private var showAll = false
+
+    private var choices: [String] {
+        // Eight that look nothing alike (one each of black, blue, jade, amber, red, lilac, berry, white).
+        // One fixed order, the same on New bot and Edit bot; a face outside it goes first.
+        var list = ["101", "102", "103", "105", "402", "106", "104", "206"]
+        for extra in [selection, suggested] where !extra.isEmpty && !list.contains(extra) { list.insert(extra, at: 0) }
+        return Array(list.prefix(8))
+    }
+
+    var body: some View {
+        let current = selection.isEmpty ? suggested : selection
+        VStack(spacing: 10) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 12) {
+                ForEach(choices, id: \.self) { n in
+                    Button {
+                        Haptics.select()
+                        selection = n
+                    } label: {
+                        StoredImage(key: "skin:\(n)", path: "skin:\(n)") { Color.clear }
+                            .frame(width: 50, height: 50)
+                            .padding(4)
+                            // Picked: a thin ring in the face's own colour and a small check, not a heavy black ring.
+                            // A ring in the text colour: one in the face's own colour vanished on a pale face.
+                            .overlay(Circle().strokeBorder(n == current ? Color.primary.opacity(0.75) : Color.clear, lineWidth: 1.5))
+                            .overlay(alignment: .bottomTrailing) {
+                                if n == current {
+                                    Image(systemName: "checkmark.circle.fill").font(.system(size: 17))
+                                        .symbolRenderingMode(.palette)
+                                        .foregroundStyle(Color(.systemBackground), Color.primary)
+                                        .background(Circle().fill(Color(.systemBackground)).padding(1))
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Skins.all.first { $0.n == n }?.title ?? "Face \(n)")
+                    .accessibilityAddTraits(n == current ? .isSelected : [])
+                }
+            }
+            Button { showAll = true } label: {
+                HStack(spacing: 3) {
+                    Text("More faces")
+                    Image(systemName: "chevron.right").font(.caption2.weight(.bold))
+                }
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(minHeight: 32)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 4)
+        .sheet(isPresented: $showAll) {
+            NavigationStack { SkinPicker(selection: $selection, allowsAutomatic: false) }
         }
     }
 }

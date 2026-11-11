@@ -8,7 +8,12 @@
  * The write checks only run against a server that says `"demo": true` in /v1/hello. Such a server is reset
  * before the first check and after the last one, unless --read-only is given. Exit code 0 when everything passed, 1 otherwise.
  */
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { networkInterfaces, tmpdir } from 'os'
+import { dirname, join } from 'path'
 import { asks, oneLine, preview, quickReplies, snippet } from './text'
+import { BadInput, bodyLimit, inQuiet, kindOf, minutesSince, overLimit, readBody, storedNote, tidyNote, wrongMethod } from './guard'
+import { CURL_ARGS, curlConfig, post as apnsPost, token as apnsToken } from './push'
 
 const args = process.argv.slice(2)
 const option = (name: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : undefined }
@@ -288,7 +293,7 @@ async function reads() {
   }
   if (hello.body?.demo) {
     const table = (await get('/v1/search?q=610')).body.messages.find((m: any) => m.agent === 'web')
-    ok(table && table.snippet.includes('Page weight 2.6 MB 610 KB · Speed score 61 97'), `a table row keeps its cells apart and its rows apart (${table?.snippet})`)
+    ok(table && table.snippet.includes('Page weight: 2.6 MB, 610 KB · Speed score: 61, 97'), `a table row keeps its cells apart and its rows apart (${table?.snippet})`)
   }
   const none = await get('/v1/search?q=a')
   ok(none.body.messages.length === 0 && none.body.cards.length === 0, 'a one letter search is empty')
@@ -570,6 +575,247 @@ async function writes() {
   ok((await post('/v1/demo/reset', {}, {})).status === 401, 'reset needs the token')
 }
 
+// ---------- what the server refuses, and what the `t3bot` command says and exits with ----------
+
+async function guards() {
+  const raw = async (path: string, body: string, headers: Record<string, string> = auth) => {
+    const res = await fetch(BASE + path, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body })
+    let parsed: any = null
+    try { parsed = await res.json() } catch {}
+    return { status: res.status, body: parsed }
+  }
+  section('Bodies the server refuses')
+  for (const [body, words] of [['null', 'JSON object'], ['[1,2]', 'JSON object'], ['"text"', 'JSON object'], ['7', 'JSON object'], ['{"title":', 'not valid JSON']] as const) {
+    const r = await raw('/v1/notify', body)
+    ok(r.status === 400 && r.body?.ok === false && String(r.body?.error).includes(words), `POST /v1/notify with body ${body} is a 400 that says why`)
+  }
+  ok((await raw('/v1/notify', 'null', {})).status === 401, 'a bad body without the token is still 401: nothing is read before the token')
+  ok((await raw('/v1/settings', '')).status === 200, 'an empty body is an empty object')
+  const big = await raw('/v1/notify', JSON.stringify({ kind: 'do', title: 'x', body: 'y'.repeat(1024 * 1024 + 10) }))
+  ok(big.status === 413 && /too large/.test(big.body?.error ?? ''), 'a notify body over 1 MB is 413')
+  ok((await raw('/v1/agents/api/send', JSON.stringify({ text: 'z'.repeat(1024 * 1024 + 10) }))).status === 200, 'the routes that carry photos take more than 1 MB')
+  const photo = await raw('/v1/agents/api/send', JSON.stringify({ images: ['A'.repeat(17 * 1024 * 1024)] }))
+  ok(photo.status === 400 && /12 MB/.test(photo.body?.error ?? ''), 'a photo over 12 MB is refused with a 400')
+  ok((await post('/v1/agents/api/send', { images: [null, 7, {}] })).status === 400, 'images that are not text are no message')
+  for (const path of ['/v1/file?path=/etc/passwd', '/v1/file?path=/demo/assets/../demo.ts', '/v1/file?path=/demo/assets/..%2F..%2Fpackage.png', '/v1/file?path=', '/v1/file']) {
+    ok((await get(path)).status === 404, `GET ${path} shows nothing`)
+  }
+  for (const path of ['/v1/avatars/..%2F..%2Fserver%2Fdemo.png', '/v1/avatars/skins/../../x.png', '/v1/avatars/UPPER.png']) {
+    const r = await get(path, {})
+    ok(r.status === 404 || r.status === 401, `GET ${path} serves no file`)
+  }
+
+  section('Notes are brought to what the app reads')
+  ok((await post('/v1/notify', { kind: 'shout', title: 'x' })).status === 400, 'an unknown kind is 400')
+  ok((await post('/v1/notify', { kind: 'do', title: { a: 1 } })).status === 400, 'a title that is not text is 400')
+  ok((await post('/v1/notify', { kind: 'do', title: '   ' })).status === 400, 'a blank title is 400')
+  const odd = await post('/v1/notify', {
+    kind: 'approve', title: 42, body: 7, link: ['x'], key: 'guard-odd', fields: [{ label: 1, value: { deep: true } }, 'junk', null],
+    checks: [{ label: 'Tests', state: 'green' }, { label: 'Build', state: 'pass' }], edit: { label: 5, text: 9 }, actions: [{ label: 'x'.repeat(500), message: 3 }, { nolabel: true }],
+  })
+  ok(odd.status === 200 && odd.body?.ok === true, 'a note with numbers where text belongs is accepted')
+  let card = (await home()).needs.find((c: any) => c.key === 'guard-odd')
+  ok(card && card.title === '42' && card.detail === '7' && card.link === undefined, 'title and body become text, a link that is not text is dropped')
+  ok(card?.fields?.length === 1 && card.fields[0].label === '1' && typeof card.fields[0].value === 'string', 'fields are label and value as text, junk rows dropped')
+  ok(card?.checks?.[0].state === 'pending' && card.checks[1].state === 'pass', 'a check state the app does not know becomes pending')
+  ok(card?.edit?.label === '5' && card.edit.text === '9', 'the editable text is text')
+  ok(card?.actions?.[0].label.length === 60 && card.actions[0].message === '3' && card.actions.length === 3, 'buttons: a bounded label, no button without one, then Done and Not now')
+  if (card) check(card, Card, 'the odd note as a card')
+  const dr = await post('/v1/notify', { kind: 'draft', title: 'Draft to Ana', key: 'guard-draft', draft: { to: 33612345678, text: 'Hi', secret: { a: 1 }, via: ['x'] } })
+  card = (await home()).needs.find((c: any) => c.key === 'guard-draft')
+  ok(dr.status === 200 && card?.draft?.to === '33612345678' && card.draft.text === 'Hi' && !('secret' in card.draft) && !('via' in card.draft), 'a draft keeps only the composer fields, as text')
+  if (card) check(card, Card, 'the odd draft as a card')
+
+  section('The t3bot command')
+  const cli = async (argv: string[], env: Record<string, string> = {}) => {
+    const p = Bun.spawn([process.execPath, join(import.meta.dir, '../bin/t3bot.ts'), ...argv],
+      { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env, T3BOT_URL: BASE, T3BOT_TOKEN: TOKEN, ...env } })
+    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited])
+    return { out, err, code }
+  }
+  let r = await cli(['notify', '--kind', 'do', '--title', 'Sign the lease', '--key', 'guard-cli', '--field', 'Rent=900 EUR', '--check', 'Papers=pass', '--action', 'Remind me=Remind me tomorrow'])
+  ok(r.code === 0 && JSON.parse(r.out).ok === true && JSON.parse(r.out).kind === 'do', 'notify exits 0 and prints the note')
+  card = (await home()).needs.find((c: any) => c.key === 'guard-cli')
+  ok(card?.title === 'Sign the lease' && card.fields?.[0].value === '900 EUR' && card.checks?.[0].state === 'pass' && card.actions?.[0].label === 'Remind me', 'the card it made has its field, check and button')
+  r = await cli(['notify', '--title', 'Tidied the logs'])
+  ok(r.code === 0 && JSON.parse(r.out).kind === 'know', 'without --kind a note is a know')
+  for (const [argv, words] of [
+    [['notify', '--kind', 'do'], '--title'], [['notify', '--title'], '--title'], [['notify', '--title', 'x', '--kind', 'urgent'], '--kind'],
+    [['notify', '--title', 'x', '--kind'], 'needs a value'], [['notify', '--title', 'x', '--boddy', 'y'], 'no option --boddy'],
+    [['notify', '--title', 'x', '--body'], 'needs a value'], [['notify', '--title', 'x', '--field', '=5'], 'no label'],
+    [['draft', '--to', 'Ana'], '--text'], [['draft', '--event', 'Dentist'], '--start'], [['draft', '--to', 'Ana', '--text', 'Hi', '--when', 'now'], 'no option --when'],
+    [['nonsense'], 'no command'], [['phone'], 'calendar'],
+  ] as const) {
+    r = await cli([...argv])
+    ok(r.code === 2 && r.err.includes(words) && !r.out.includes('"ok"'), `t3bot ${argv.join(' ')} exits 2 and names ${words}`)
+  }
+  r = await cli(['draft', '--to', 'Ana', '--text', 'On my way', '--key', 'guard-cli-draft'])
+  ok(r.code === 0 && /sends it themselves/.test(r.out), 'draft exits 0 and says the person sends it')
+  r = await cli(['notify', '--kind', 'do', '--title', 'x'], { T3BOT_URL: 'http://127.0.0.1:9' })
+  ok(r.code === 1 && /did not answer/.test(r.err) && r.out === '', 'with the server down notify exits 1 and says it did not answer')
+  r = await cli(['notify', '--kind', 'do', '--title', 'x'], { T3BOT_TOKEN: 'not-the-token-at-all' })
+  ok(r.code === 1 && /refused the token/.test(r.err) && !r.err.includes('not-the-token-at-all'), 'with a wrong token notify exits 1, says so and does not print the token')
+  r = await cli(['needs', '--json'])
+  ok(r.code === 0 && Array.isArray(JSON.parse(r.out)), 'needs --json prints the list')
+  r = await cli(['help'])
+  ok(r.code === 0 && !r.out.includes('\u2014') && !r.out.includes('\u2013'), 'help has no long dashes')
+  for (const word of ['notify', 'draft', 'phone', 'needs', 'roster', 'home', 'agent', 'setup', 'pair', 'doctor', 'demo', 'connect', 'version', '--force', '--face-id', '--edit-label', 'Exit codes']) {
+    ok(r.out.includes(word), `help mentions ${word}`)
+  }
+  await post('/v1/demo/reset')
+}
+
+// ---------- second pass: methods, real callers of `t3bot notify`, the push request, where the demo listens ----------
+
+/** A port nothing listens on, from 8850 up. */
+function freePort(from = 8850): number {
+  for (let p = from; p < from + 60; p++) {
+    try { Bun.serve({ port: p, hostname: '127.0.0.1', fetch: () => new Response('') }).stop(true); return p } catch {}
+  }
+  throw new Error('no free port from 8850 up')
+}
+
+async function secondPass() {
+  section('Wrong methods, on the running server')
+  const ask = async (method: string, path: string, headers: Record<string, string> = auth) => {
+    const res = await fetch(BASE + path, { method, headers })
+    return { status: res.status, allow: res.headers.get('allow'), body: await res.json().catch(() => null) as any }
+  }
+  let a = await ask('PUT', '/v1/home')
+  ok(a.status === 405 && a.allow === 'GET' && typeof a.body?.error === 'string', 'PUT /v1/home is 405 with Allow: GET and a sentence')
+  a = await ask('GET', '/v1/notify')
+  ok(a.status === 405 && a.allow === 'POST', 'GET /v1/notify is 405 with Allow: POST')
+  a = await ask('DELETE', '/v1/settings')
+  ok(a.status === 405 && a.allow === 'GET, POST', 'DELETE /v1/settings is 405 with Allow: GET, POST')
+  a = await ask('POST', '/v1/agents/web')
+  ok(a.status === 405 && a.allow === 'GET', 'POST /v1/agents/web is 405 with Allow: GET')
+  a = await ask('GET', '/v1/agents/web/send')
+  ok(a.status === 405 && a.allow === 'POST', 'GET /v1/agents/web/send is 405 with Allow: POST')
+  for (const method of ['GET', 'POST', 'PUT', 'DELETE']) ok((await ask(method, '/v1/nothing-here')).status === 404, `${method} on an unknown path is still 404`)
+  a = await ask('PUT', '/v1/home', {})
+  ok(a.status === 401 && a.allow === null, 'without a token a wrong method is 401, and nothing says the path exists')
+  ok((await ask('GET', '/v1/home')).status === 200 && (await post('/v1/settings', {})).status === 200, 'the right methods answer as before')
+  ok((await ask('POST', '/v1/agents/no-such-bot/send')).status === 404, 'the right method on a bot that does not exist is still 404')
+
+  section('The calls real automations make to t3bot notify')
+  const tmp = mkdtempSync(join(tmpdir(), 't3bot-check-'))
+  try {
+    // `crew` was the command's first name and scripts still call it: a link to the same wrapper.
+    symlinkSync(join(import.meta.dir, '../bin/t3bot'), join(tmp, 'crew'))
+    const run = async (bin: string, argv: string[]) => {
+      const p = Bun.spawn([bin, ...argv], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
+        env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}`, T3BOT_URL: BASE, T3BOT_TOKEN: TOKEN } })
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited])
+      return { out, err, code }
+    }
+    const t3bot = join(import.meta.dir, '../bin/t3bot'), crew = join(tmp, 'crew')
+    const cardOf = async (key: string) => (await home()).needs.find((c: any) => c.key === key)
+    // A cost alarm: a title of about 120 characters and a body of 900 with line breaks, for a bot this server may not have.
+    const lines = Array.from({ length: 12 }, (_, i) => `Vercel spend for project-${i} is 4.2 times its 14 day average: $${i}.40 today, usually $0.3${i}`)
+    const title = `${lines[0].slice(0, 110)} (+11 more)`, body = lines.join('\n').slice(0, 900)
+    let r = await run(t3bot, ['notify', '--agent', 'costs', '--kind', 'alarm', '--title', title, '--body', body, '--key', 'cost-watch-2026-11-11'])
+    let c = await cardOf('cost-watch-2026-11-11')
+    ok(r.code === 0 && JSON.parse(r.out).ok === true, 'a cost alarm (long title, 900 character body, a key) exits 0')
+    ok(c?.kind === 'alarm' && c.rank === 0 && c.title === title && c.detail === body, 'its title and its body arrive whole, line breaks included')
+    if (c) check(c, Card, 'the cost alarm as a card')
+    r = await run(t3bot, ['notify', '--agent', 'web', '--kind', 'do', '--title', 'Moorline could not send your reply to Ana', '--key', 'moorline-approval-12', '--body', 'SMTP timeout. It is in the conversation in Moorline with Retry.'])
+    c = await cardOf('moorline-approval-12')
+    ok(r.code === 0 && c?.kind === 'do' && c.agent === 'web' && /Retry\.$/.test(c.detail), 'a do note with --agent, --key and --body, in any order, lands on that bot')
+    r = await run(t3bot, ['notify', '--agent', 'web', '--kind', 'know', '--title', 'Moorline sent your reply to Ana', '--key', 'moorline-approval-13'])
+    const know = (await get('/v1/know')).body?.notes ?? []
+    ok(r.code === 0 && know.some((n: any) => n.title === 'Moorline sent your reply to Ana' && n.kind === 'know'), 'a know note with no body goes to the digest')
+    r = await run(t3bot, ['notify', '--agent', 'chief', '--kind', 'approve', '--title', 'Reply to Ana is ready', '--key', 'compat-approve'])
+    ok(r.code === 0 && (await cardOf('compat-approve'))?.kind === 'approve', 'approve is a kind')
+    r = await run(crew, ['notify', '--agent', 'chief', '--kind', 'do', '--title', 'Message Hugo on Instagram', '--body', 'You asked yesterday to be reminded this morning.', '--key', 'remind-hugo'])
+    ok(r.code === 0 && (await cardOf('remind-hugo'))?.title === 'Message Hugo on Instagram', 'the old command name (a link called crew) still sends a note')
+    r = await run(t3bot, ['notify', '--kind', 'ALARM', '--title', 'Site down', '--key', 'compat-caps'])
+    ok(r.code === 0 && (await cardOf('compat-caps'))?.kind === 'alarm', 'a kind written in capitals is taken')
+    r = await run(t3bot, ['notify', '--kind', 'do', '--title', '-12% trials this week', '--body', '-- see the log, then --force if needed', '--key', 'compat-dashes'])
+    c = await cardOf('compat-dashes')
+    ok(r.code === 0 && c?.title === '-12% trials this week' && c.detail === '-- see the log, then --force if needed', 'a title or body that starts with dashes is text, not an option')
+    r = await run(t3bot, ['notify', '--kind', 'do', '--title', 'Empty body', '--body', '', '--key', 'compat-empty'])
+    ok(r.code === 0 && (await cardOf('compat-empty'))?.detail === undefined, 'an empty --body is a note without a body, not an error')
+    const direct = await post('/v1/notify', { kind: ' Do ', title: 'Posted without the command', key: 'compat-direct', agent: 'web', extra: { ignored: true }, urgency: 'now' })
+    ok(direct.status === 200 && (await cardOf('compat-direct'))?.kind === 'do', 'a script that posts the JSON itself, with fields the server does not know, is taken')
+    const h = await home()
+    check(h, Home, 'home after the automations wrote to it')
+  } finally { rmSync(tmp, { recursive: true, force: true }) }
+
+  section('The push request, sent to a local stand-in for APNs with a throwaway key')
+  const keyDir = mkdtempSync(join(tmpdir(), 't3bot-check-key-'))
+  const seen: { auth: string | null; topic: string | null; method: string; path: string; body: string; ps: string }[] = []
+  const apnsPort = freePort()
+  const apns = Bun.serve({ port: apnsPort, hostname: '127.0.0.1', async fetch(req) {
+    const u = new URL(req.url)
+    // What any other process on this computer could read while the request is on its way.
+    const ps = Bun.spawnSync(['ps', '-axww', '-o', 'args=']).stdout.toString()
+    seen.push({ auth: req.headers.get('authorization'), topic: req.headers.get('apns-topic'), method: req.method, path: u.pathname, body: await req.text(), ps })
+    return u.pathname.endsWith('/dead') ? Response.json({ reason: 'Unregistered' }, { status: 410 }) : new Response('')
+  } })
+  try {
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+    const der = Buffer.from(await crypto.subtle.exportKey('pkcs8', pair.privateKey)).toString('base64')
+    const keyPath = join(keyDir, 'AuthKey_THROWAWAY1.p8')
+    writeFileSync(keyPath, `-----BEGIN PRIVATE KEY-----\n${der.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----\n`, { mode: 0o600 })
+    chmodSync(keyPath, 0o600)
+    const jwt = await apnsToken({ keyId: 'THROWAWAY1', teamId: 'TEAM123456', keyPath, topic: 'com.example.t3bot' })
+    const [h64, b64, s64] = jwt.split('.')
+    const unb64 = (x: string) => Buffer.from(x.replace(/-/g, '+').replace(/_/g, '/'), 'base64')
+    const head = JSON.parse(unb64(h64).toString()), claims = JSON.parse(unb64(b64).toString())
+    ok(head.alg === 'ES256' && head.kid === 'THROWAWAY1' && claims.iss === 'TEAM123456' && Math.abs(claims.iat - Date.now() / 1000) < 60, 'the provider token names the key, the team and now')
+    ok(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, unb64(s64), new TextEncoder().encode(`${h64}.${b64}`)), 'its signature is the throwaway key\'s')
+    const payload = JSON.stringify({ aps: { alert: { title: 'Ana: "ready?" \\o/', body: 'Line one\nLine two\ttabbed, C:\\dir, 100% #1 $HOME café 🙂 \'single\'' }, sound: 'default' }, t3bot: { agent: 'web' } })
+    const headers = [`authorization: bearer ${jwt}`, 'apns-topic: com.example.t3bot', 'apns-push-type: alert', 'apns-priority: 10']
+    const device = 'ab12cd34'.repeat(8)
+    const sent = await apnsPost(`http://127.0.0.1:${apnsPort}`, device, headers, payload)
+    const got = seen[0]
+    ok(sent.code === '200' && seen.length === 1, 'the request arrives and its answer is read (200)')
+    ok(got?.method === 'POST' && got.path === `/3/device/${device}`, 'it is a POST to the device')
+    ok(got?.auth === `bearer ${jwt}` && got.topic === 'com.example.t3bot', 'the token and the topic arrive as headers')
+    ok(got?.body === payload, 'the payload arrives byte for byte (quotes, backslashes, line breaks, accents)')
+    const curlLine = (got?.ps ?? '').split('\n').find((l) => l.includes('curl') && l.includes('--config'))
+    ok(!!curlLine && curlLine.includes('--http2'), 'while it is sent, ps shows curl with --http2 and --config')
+    ok(!!got && !got.ps.includes(jwt) && !got.ps.includes(s64) && !got.ps.includes('bearer'), 'ps shows no token')
+    ok(!!got && !got.ps.includes(device) && !got.ps.includes('ready?') && !got.ps.includes('apns-topic'), 'ps shows no device, no header and none of the message')
+    const dead = await apnsPost(`http://127.0.0.1:${apnsPort}`, 'dead', headers, payload)
+    ok(dead.code === '410' && dead.body.includes('Unregistered'), 'a refusal still comes back with its code and reason (410)')
+    const before = seen.length
+    const split = await apnsPost(`http://127.0.0.1:${apnsPort}`, device, [...headers, 'apns-collapse-id: x\nurl = "http://127.0.0.1:9/"'], payload)
+    const slash = await apnsPost(`http://127.0.0.1:${apnsPort}`, '../../x', headers, payload)
+    ok(split.code === '0' && slash.code === '0' && seen.length === before, 'a header with a line break, or a device that is not letters and digits, is not sent at all')
+    const down = await apnsPost('http://127.0.0.1:9', device, headers, payload)
+    ok(down.code !== '200' && !down.body.includes(jwt), 'when the other side is down the answer says so, without the token')
+  } finally { apns.stop(true); rmSync(keyDir, { recursive: true, force: true }) }
+
+  section('The demo listens on this computer only, unless asked')
+  const lan = Object.values(networkInterfaces()).flat().find((i) => i && i.family === 'IPv4' && !i.internal)?.address
+  const reach = async (host: string, port: number) => { try { return (await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(1500) })).status === 200 } catch { return false } }
+  const start = async (argv: string[], env: Record<string, string> = {}) => {
+    const port = freePort(apnsPort + 1)
+    const cleanEnv: Record<string, string> = { ...(process.env as Record<string, string>), ...env }
+    if (!('T3BOT_DEMO_HOST' in env)) delete cleanEnv.T3BOT_DEMO_HOST
+    const p = Bun.spawn([process.execPath, join(import.meta.dir, 'demo.ts'), '--port', String(port), '--no-banner', ...argv], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: cleanEnv })
+    let up = false
+    for (let i = 0; i < 40 && !up && p.exitCode === null; i++) { await sleep(150); up = await reach('127.0.0.1', port) }
+    const onLan = lan ? await reach(lan, port) : null
+    p.kill(); await p.exited
+    return { up, onLan, line: (await new Response(p.stdout).text()).split('\n')[0] }
+  }
+  let d = await start([])
+  ok(d.up && /127\.0\.0\.1:\d+: this computer only/.test(d.line) && d.line.includes('--lan'), 'by default it listens on 127.0.0.1, and its first line says so and names --lan')
+  if (lan) ok(d.onLan === false, 'by default it does not answer on the network address')
+  d = await start(['--lan'])
+  ok(d.up && /0\.0\.0\.0:\d+: open to your network/.test(d.line) && d.line.includes('"demo"'), 'with --lan it listens on every address, and its first line warns about the public token')
+  if (lan) ok(d.onLan === true, 'with --lan it answers on the network address')
+  d = await start([], { T3BOT_DEMO_HOST: '0.0.0.0' })
+  ok(d.up && /open to your network/.test(d.line), 'T3BOT_DEMO_HOST=0.0.0.0 opens it too')
+  d = await start(['--host', '127.0.0.1'], { T3BOT_DEMO_HOST: '0.0.0.0' })
+  ok(d.up && /this computer only/.test(d.line), '--host wins over the environment')
+  const help = Bun.spawnSync([process.execPath, join(import.meta.dir, '../bin/t3bot.ts'), 'help']).stdout.toString()
+  ok(help.includes('--lan') && help.includes('T3BOT_DEMO_HOST') && /this computer only \(127\.0\.0\.1\)/.test(help), 'help says where the demo listens and how to open it')
+  await post('/v1/demo/reset')
+}
+
 // ---------- frozen servers answer the same twice ----------
 
 async function steady() {
@@ -590,6 +836,117 @@ async function steady() {
 // ---------- the text rules both servers share (server/text.ts) ----------
 
 function rules() {
+  section('Guards (server/guard.ts)')
+  const at = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3))
+  for (const [from, to, time, quiet] of [
+    ['23:00', '08:00', '22:59', false], ['23:00', '08:00', '23:00', true], ['23:00', '08:00', '23:59', true], ['23:00', '08:00', '00:00', true],
+    ['23:00', '08:00', '07:59', true], ['23:00', '08:00', '08:00', false], ['23:00', '08:00', '12:00', false],
+    ['01:00', '07:00', '00:59', false], ['01:00', '07:00', '01:00', true], ['01:00', '07:00', '06:59', true], ['01:00', '07:00', '07:00', false], ['01:00', '07:00', '23:30', false],
+    ['00:00', '00:00', '00:00', false], ['09:00', '09:00', '09:00', false], ['00:00', '23:59', '23:58', true], ['00:00', '23:59', '23:59', false],
+    ['23:59', '00:00', '23:59', true], ['23:59', '00:00', '00:00', false], ['25:00', '08:00', '02:00', false], ['23:00', '', '02:00', false],
+  ] as const) ok(inQuiet(from, to, at(time)) === quiet, `quiet ${from} to ${to}: ${time} is ${quiet ? 'inside' : 'outside'}`)
+  for (const [start, time, since] of [['08:00', '08:00', 0], ['08:00', '10:59', 179], ['08:00', '11:00', 180], ['08:00', '07:59', 1439],
+    ['22:30', '23:59', 89], ['22:30', '00:00', 90], ['22:30', '01:29', 179], ['22:30', '01:30', 180], ['00:00', '00:00', 0], ['8:00', '09:00', -1], ['', '09:00', -1]] as const) {
+    ok(minutesSince(start, at(time)) === since, `the brief of ${start || 'no time'}: at ${time} it is ${since} minutes in`)
+  }
+  ok(bodyLimit('/v1/notify') === 1024 * 1024 && bodyLimit('/v1/settings') === 1024 * 1024, 'small routes read 1 MB at most')
+  ok(bodyLimit('/v1/agents/chief/send') > 30e6 && bodyLimit('/v1/share') > 30e6, 'send and share have room for photos')
+  ok(bodyLimit('/v1/agents/chief/send/x') === 1024 * 1024 && bodyLimit('/v1/agents/Chief/send') === 1024 * 1024, 'only the exact send route does')
+  ok(overLimit('/v1/notify', '2000000') && !overLimit('/v1/notify', '2000') && !overLimit('/v1/notify', null) && !overLimit('/v1/notify', 'abc'), 'the declared length is checked')
+  ok(overLimit('/v1/notify', null, 2e6) && !overLimit('/v1/share', null, 2e6), 'and so is what was read')
+  ok(readBody('').body && readBody('  \n').body && readBody('{"a":1}').body?.a === 1, 'an empty body is an empty object, an object is itself')
+  for (const bad of ['null', '[]', '"x"', '3', 'true', '{', 'x']) ok(readBody(bad).error && !readBody(bad).body, `the body ${bad} is refused`)
+  const thrown = (fn: () => unknown) => { try { fn(); return null } catch (e) { return e } }
+  for (const bad of [null, 'x', [], {}, { title: '' }, { title: [] }, { title: 'x', kind: 'nope' }, { title: 'x', kind: 5 }, { title: 'x', kind: '' }]) {
+    ok(thrown(() => tidyNote(bad)) instanceof BadInput, `tidyNote refuses ${JSON.stringify(bad)}`)
+  }
+  const note = tidyNote({ title: `  ${'t'.repeat(999)}`, body: 'b'.repeat(99999), key: 'k'.repeat(999), link: 'l'.repeat(9999), agent: 12,
+    fields: Array.from({ length: 99 }, () => ({ label: 'l'.repeat(999), value: 'v'.repeat(9999) })), checks: [{ label: 'c', state: 'pass' }, { label: 'c', state: { x: 1 } }, 5],
+    edit: { text: 'e'.repeat(99999) }, actions: Array.from({ length: 30 }, (_, i) => ({ label: `Go ${i}`, handler: i === 0 ? 'ship' : undefined, faceId: i === 1 ? 0 : undefined })),
+    draft: 'not a draft' })
+  ok(note.kind === 'know' && note.title.length === 300 && note.body!.length === 8000 && note.key!.length === 200 && note.link!.length === 2000 && note.agent === '12', 'tidyNote bounds every text')
+  ok(note.fields!.length === 40 && note.fields![0].label.length === 200 && note.fields![0].value.length === 2000, 'at most 40 fields, each bounded')
+  ok(note.checks!.length === 2 && note.checks![0].state === 'pass' && note.checks![1].state === 'pending', 'checks keep the three states only')
+  ok(note.edit!.label === 'Text' && note.edit!.text.length === 20000, 'the editable text is bounded and labelled')
+  ok(note.actions!.length === 6 && note.actions![0].handler === 'ship' && note.actions![0].id === 'a0' && note.actions![1].faceId === false && note.actions![2].faceId === undefined, 'at most six buttons')
+  ok(Object.keys(note.draft).length === 0 && JSON.stringify(tidyNote({ title: 'x', kind: 'draft', draft: { to: 5, text: ' hi ', nope: 1, start: null } }).draft) === '{"to":"5","text":"hi"}', 'a draft holds composer fields as text')
+  ok(tidyNote({ title: 'x' }).fields === undefined && tidyNote({ title: 'x', actions: [] }).actions!.length === 0, 'what was not sent stays unset')
+
+  section('Stored notes are read back in the shape the app decodes')
+  const NoteCardParts: Spec = {
+    id: 'string', agent: 'string', kind: 'string', title: 'string', body: 'string?', link: 'string?', key: 'string?', created_at: 'date',
+    'fields?': [{ label: 'string', value: 'string' }], 'checks?': [{ label: 'string', state: 'string' }], 'edit?': { label: 'string', text: 'string' },
+    'actions?': [{ id: 'string', label: 'string', kind: 'string', style: 'string?', faceId: 'bool?' }],
+  }
+  // A note exactly as today's server saves it comes back unchanged: nothing valid is dropped or altered.
+  const good = {
+    id: 'chief:lease', agent: 'chief', kind: 'do', title: 'Sign the lease', body: 'Before Friday.\nTwo pages.', link: 'https://example.com/lease', key: 'lease',
+    created_at: '2026-11-10T09:00:00.000Z', read_at: null,
+    data: JSON.stringify({ fields: [{ label: 'Rent', value: '900 EUR' }], checks: [{ label: 'Papers', state: 'pass' }], edit: { label: 'Reply', text: ' keep my spaces ' },
+      actions: [{ id: 'a0', label: 'Remind me', kind: 'message', style: 'primary', faceId: false, message: 'Remind me tomorrow' }, { id: 'done', label: 'Done', kind: 'done' }, { id: 'snooze', label: 'Not now', kind: 'snooze' }], faceId: false }),
+  }
+  const back = storedNote(good)!
+  ok(back.id === good.id && back.agent === 'chief' && back.kind === 'do' && back.title === good.title && back.body === good.body && back.link === good.link && back.key === 'lease' && back.created_at === good.created_at, 'a valid note keeps its id, bot, kind, title, body, link, key and date')
+  ok(JSON.stringify({ fields: back.fields, checks: back.checks, edit: back.edit, actions: back.actions, faceId: back.faceId }) === JSON.stringify(JSON.parse(good.data)), 'a valid note keeps its fields, checks, text and buttons exactly')
+  check(back, NoteCardParts, 'a valid stored note')
+  // Notes as an older server could have saved them: wrong types everywhere. Each is kept and made readable.
+  const old: [string, any][] = [
+    ['a title and body saved as numbers', { id: 'n1', agent: 'web', kind: 'alarm', title: 42, body: 7, link: 3, key: 9, created_at: '2026-11-01T08:00:00Z', data: null }],
+    ['data that is not JSON', { id: 'n2', agent: 'web', kind: 'do', title: 'x', created_at: '2026-11-01T08:00:00Z', data: '{not json' }],
+    ['data that is a list', { id: 'n3', agent: 'web', kind: 'do', title: 'x', created_at: '2026-11-01T08:00:00Z', data: '[1,2]' }],
+    ['card parts that are not lists', { id: 'n4', agent: 'web', kind: 'approve', title: 'x', created_at: '2026-11-01T08:00:00Z', data: JSON.stringify({ fields: 'Rent=900', checks: { label: 'a' }, edit: 'text', actions: 5, faceId: 'yes' }) }],
+    ['values of the wrong type inside the lists', { id: 'n5', agent: 'web', kind: 'approve', title: 'x', created_at: '2026-11-01T08:00:00Z', data: JSON.stringify({
+      fields: [{ label: 1, value: { deep: true } }, 'junk', null, { value: 'no label' }], checks: [{ label: 'Tests', state: 'green' }, { label: 5, state: null }],
+      edit: { label: 5, text: 9 }, actions: [{ label: 'Go', id: 7, kind: 3, style: {}, faceId: 'x', message: 4 }, { nolabel: true }, 'junk'] }) }],
+    ['no title, no date, a bot saved as a number', { id: 'n6', agent: 12, kind: 'do', title: null, created_at: 5, data: '{}' }],
+    ['a draft with fields the composer does not take', { id: 'n7', agent: 'web', kind: 'draft', title: 'Draft to Ana', created_at: '2026-11-01T08:00:00Z', data: JSON.stringify({ to: 33612345678, text: 'Hi', via: ['x'], secret: { a: 1 }, start: null }) }],
+    ['a know note with a number as its title', { id: 'n8', agent: 'web', kind: 'know', title: 2026, body: { a: 1 }, created_at: '2026-11-01T08:00:00Z' }],
+    ['very long texts', { id: 'n9', agent: 'web', kind: 'do', title: 't'.repeat(5000), body: 'b'.repeat(99999), created_at: '2026-11-01T08:00:00Z', data: JSON.stringify({ fields: Array.from({ length: 500 }, (_, i) => ({ label: `f${i}`, value: 'v'.repeat(9999) })) }) }],
+  ]
+  for (const [what, row] of old) {
+    const n = storedNote(row)
+    ok(n !== null && n.id === row.id, `an old note with ${what} is kept`)
+    if (n) check(JSON.parse(JSON.stringify(n)), NoteCardParts, `an old note with ${what}`)
+    if (n?.draft) check(n.draft, Draft, `the draft of an old note with ${what}`)
+  }
+  const n5 = storedNote(old[4][1])!, n6 = storedNote(old[5][1])!, n9 = storedNote(old[8][1])!
+  ok(n5.fields!.length === 2 && n5.fields![0].label === '1' && n5.fields![0].value === '' && n5.checks![0].state === 'pending' && n5.edit!.text === '9' && n5.actions!.length === 1 && n5.actions![0].kind === '3', 'wrong values become text, an unknown check state is pending, a button without a label is left out')
+  ok(n6.title === '(no title)' && n6.agent === '12' && n6.created_at === '1970-01-01T00:00:00.000Z', 'a note with no title or date still has both')
+  ok(n9.title.length === 300 && n9.body!.length === 8000 && n9.fields!.length === 40 && n9.fields![0].value.length === 2000, 'old texts get the sizes new ones have')
+  ok(storedNote(old[3][1])!.actions === undefined && storedNote(old[3][1])!.fields === undefined && storedNote(old[3][1])!.faceId === true, 'parts that cannot be read are left out, so the card shows its usual buttons')
+  ok(JSON.stringify(storedNote(old[6][1])!.draft) === '{"to":"33612345678","text":"Hi"}', 'an old draft holds only composer fields, as text')
+  ok(storedNote({ id: '', kind: 'do', title: 'x' }) === null && storedNote({ id: 'x', kind: 'shout', title: 'x' }) === null && storedNote(null) === null && storedNote('x') === null, 'only a row with no id or an unknown kind is not a note')
+  ok(storedNote({ id: ' padded ', kind: 'do', title: 'x', created_at: 'x' })!.id === ' padded ', "a note's id is never altered (its buttons find the row by it)")
+  ok(storedNote(old[0][1])!.created_at === '2026-11-01T08:00:00.000Z' && storedNote({ id: 'z', kind: 'do', title: 'x', created_at: '2026-11-01T10:00:00+02:00' })!.created_at === '2026-11-01T08:00:00.000Z', 'a date saved in another form goes out as the same moment in the form the server writes')
+
+  // The real server cannot be started by these checks, so its source is read: both places that hand notes to the app go through storedNote.
+  const real = readFileSync(join(import.meta.dir, 't3bot.ts'), 'utf8')
+  ok(/function noteCards\(\)[\s\S]{0,600}storedNote\(row\)/.test(real), 't3bot.ts: the cards on /v1/home are built from storedNote')
+  ok(/path === '\/v1\/know'[\s\S]{0,600}storedNote\(row\)/.test(real), 't3bot.ts: the notes on /v1/know are read through storedNote')
+
+  section('A wrong method on a known path is 405')
+  const demoOnly: [RegExp, string][] = [[/^\/v1\/(cards\/undo|demo\/reset)$/, 'POST']]
+  for (const file of ['t3bot.ts', 'demo.ts']) {
+    const src = readFileSync(join(import.meta.dir, file), 'utf8')
+    const routes = [...src.matchAll(/path === '(\/v1\/[^']+)' && (GET|POST)/g)]
+    ok(routes.length >= 20, `${file}: its routes were found (${routes.length})`)
+    for (const [, path, method] of routes) {
+      ok(wrongMethod(path, method, demoOnly) === null && (wrongMethod(path, 'DELETE', demoOnly) ?? '').includes(method), `${file}: ${method} ${path} is in the table of methods`)
+    }
+  }
+  ok(wrongMethod('/v1/home', 'POST') === 'GET' && wrongMethod('/v1/notify', 'GET') === 'POST' && wrongMethod('/v1/settings', 'PUT') === 'GET, POST', 'the Allow header names the methods the path takes')
+  ok(wrongMethod('/v1/agents/web', 'POST') === 'GET' && wrongMethod('/v1/agents/web/send', 'GET') === 'POST' && wrongMethod('/v1/cards/done', 'GET') === 'POST', 'paths with a bot id or a card action are known too')
+  ok(wrongMethod('/v1/nothing-here', 'GET') === null && wrongMethod('/v1/cards/undo', 'GET') === null && wrongMethod('/v1/agents/UPPER', 'POST') === null && wrongMethod('/', 'PUT') === null, 'an unknown path has no Allow header (it stays 404)')
+  ok(kindOf(undefined) === 'know' && kindOf(null) === 'know' && kindOf(' ALARM ') === 'alarm' && kindOf('Do') === 'do', 'a kind is read in any case, and is know when left out')
+  ok(tidyNote({ title: 'x', kind: 'Approve' }).kind === 'approve' && thrown(() => tidyNote({ title: 'x', kind: 'urgent' })) instanceof BadInput, 'a kind in capitals is taken, a kind that does not exist is still refused')
+
+  section('The push request keeps the token off the command line')
+  const cfgText = curlConfig('https://api.push.apple.com/3/device/ab12', ['authorization: bearer aaa.bbb.ccc', 'apns-topic: com.example.app'], '{"a":"say \\"hi\\"\\n","b":"C:\\\\dir"}')
+  ok(CURL_ARGS.includes('--http2') && CURL_ARGS.includes('--config') && CURL_ARGS[CURL_ARGS.length - 1] === '-', 'curl still speaks HTTP/2 and reads its options from stdin')
+  ok(!CURL_ARGS.some((a) => /bearer|authorization|https?:|device/i.test(a)), 'the command line holds no token, header, address or device')
+  ok(cfgText.split('\n').length === 6 && cfgText.endsWith('\n') && cfgText.includes('header = "authorization: bearer aaa.bbb.ccc"'), 'the options are one per line: address, method, headers, payload')
+  ok(cfgText.includes(String.raw`data-binary = "{\"a\":\"say \\\"hi\\\"\\n\",\"b\":\"C:\\\\dir\"}"`), 'quotes and backslashes in the payload are escaped for curl')
+
   section('Text rules both servers share')
   const photo = '[Image from Sam: /Users/sam/shot.png (open it to see it)]'
   ok(preview(photo) === 'Photo', 'a message that is only a photo line reads "Photo"')
@@ -604,7 +961,7 @@ function rules() {
   const long = 'Before the table there is a sentence that is long enough to push the numbers past the first sixty characters of the message.\n\n| Metric | Before | After |\n|---|---|---|\n| Page weight | 2.6 MB | 610 KB |\n| Speed score | 61 | 97 |\n\n- one item\n- another item\n\n```bash\nbun run build\nbun run links\n```\n\nAfter the table the message goes on for a while so that the end of the snippet has to be cut as well, somewhere in here.'
   const sn = snippet(long, '610')
   ok(sn.startsWith('…') && sn.endsWith('…'), `a snippet cut at both ends has an ellipsis at both (${sn})`)
-  ok(sn.includes('Page weight 2.6 MB 610 KB · Speed score 61 97 · one item · another item · bun run build · bun run links'), 'rows, list items and code lines stay apart')
+  ok(sn.includes('Page weight: 2.6 MB, 610 KB · Speed score: 61, 97 · one item · another item · bun run build · bun run links'), 'rows, list items and code lines stay apart')
   ok(!/[|`]/.test(sn) && sn.length <= 204, 'no pipes or fences, about 200 characters')
   ok(snippet('A short message', 'short') === 'A short message', 'a short message is its own snippet, with no ellipsis')
   ok(snippet(long, 'nothing like this').startsWith('Before the table'), 'without a match the snippet is the start of the message')
@@ -629,6 +986,8 @@ rules()
 const hello = await reads().catch((e) => { ok(false, `the read checks stopped: ${e}`); return null })
 if (hello?.demo && !READ_ONLY) {
   await writes().catch((e) => ok(false, `the write checks stopped: ${e?.stack ?? e}`))
+  await guards().catch((e) => ok(false, `the guard checks stopped: ${e?.stack ?? e}`))
+  await secondPass().catch((e) => ok(false, `the second pass checks stopped: ${e?.stack ?? e}`))
   const frozen = await steady()
   console.log(`\n${frozen ? 'Frozen server: captures match.' : 'Live server: answers change over time, the frozen check was skipped.'}`)
 } else if (!READ_ONLY) console.log('\nNot a demo server: write checks skipped.')

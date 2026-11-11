@@ -7,7 +7,7 @@
 import { existsSync, readFileSync } from 'fs'
 import { APNS_FILE, untilde } from './config'
 
-type Conf = { keyId: string; teamId: string; keyPath: string; topic: string }
+export type Conf = { keyId: string; teamId: string; keyPath: string; topic: string }
 export type Env = 'sandbox' | 'production'
 type Log = (m: string, x?: unknown) => void
 let jwt: { token: string; at: number; key: string } | null = null
@@ -31,7 +31,8 @@ export function apnsStatus(): { conf: Conf | null; problem: string | null } {
 const b64url = (b: ArrayBuffer | Uint8Array | string) =>
   Buffer.from(typeof b === 'string' ? b : new Uint8Array(b as ArrayBuffer)).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_')
 
-async function token(c: Conf): Promise<string> {
+/** The provider token APNs asks for: a JWT signed with the .p8 key (exported for the checks, which sign with a throwaway key). */
+export async function token(c: Conf): Promise<string> {
   // APNs accepts a token for up to an hour and refuses one refreshed more often than every 20 minutes.
   const key = `${c.teamId}:${c.keyId}:${c.keyPath}`
   if (jwt && jwt.key === key && Date.now() - jwt.at < 40 * 60e3) return jwt.token
@@ -60,15 +61,30 @@ async function ready(log: Log): Promise<{ c: Conf; jwtToken: string } | null> {
   }
 }
 
-const hostFor = (env: Env) => (env === 'production' ? 'api.push.apple.com' : 'api.sandbox.push.apple.com')
+const hostFor = (env: Env) => (env === 'production' ? 'https://api.push.apple.com' : 'https://api.sandbox.push.apple.com')
 
-/** One POST to APNs. Answers with the HTTP code ('0' when curl itself failed) and the response body. */
-async function post(host: string, deviceToken: string, headers: string[], payload: string): Promise<{ code: string; body: string }> {
+/**
+ * What curl is told on its standard input (`--config -`): the address, the headers and the payload. The provider
+ * token is one of the headers, and anything on a command line can be read by every process on the computer
+ * (`ps`), so none of it goes there: the command line only says "read your options from stdin".
+ * A config value is a quoted string where a backslash and a double quote are escaped; JSON has no raw line break.
+ */
+const quoted = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t')}"`
+export const CURL_ARGS = ['curl', '-sS', '--http2', '--max-time', '20', '-o', '-', '-w', '\n%{http_code}', '--config', '-']
+export function curlConfig(url: string, headers: string[], payload: string): string {
+  return [`url = ${quoted(url)}`, 'request = "POST"', ...headers.map((h) => `header = ${quoted(h)}`), `data-binary = ${quoted(payload)}`, ''].join('\n')
+}
+
+/**
+ * One POST to APNs (`origin` is https://<the APNs host>; the checks pass a local address). Answers with the HTTP
+ * code ('0' when curl itself failed) and the response body.
+ */
+export async function post(origin: string, deviceToken: string, headers: string[], payload: string): Promise<{ code: string; body: string }> {
   try {
-    const p = Bun.spawn(['curl', '-sS', '--http2', '--max-time', '20', '-o', '-', '-w', '\n%{http_code}', '-X', 'POST',
-      ...headers.flatMap((h) => ['-H', h]), '--data-binary', '@-', `https://${host}/3/device/${deviceToken}`],
-      { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
-    p.stdin.write(payload); p.stdin.end()
+    // A header with a line break would start a second one: such a request is not sent at all.
+    if (headers.some((h) => /[\r\n]/.test(h)) || /[^0-9a-zA-Z]/.test(deviceToken)) return { code: '0', body: 'not sent: a header or the device token is not well formed' }
+    const p = Bun.spawn(CURL_ARGS, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+    p.stdin.write(curlConfig(`${origin}/3/device/${deviceToken}`, headers, payload)); p.stdin.end()
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited])
     const lines = out.trim().split('\n')
     const code = lines.pop() || '0'

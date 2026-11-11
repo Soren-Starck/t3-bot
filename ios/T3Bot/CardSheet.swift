@@ -10,12 +10,19 @@ struct CardSheet: View {
     @State private var composer: String?
     @State private var editText = ""
     @State private var editLoaded = false
+    /// The card's height, for a sheet that fits it; nil until measured, or when it needs the whole screen.
+    @State private var fitted: CGFloat?
+    /// The sheet's height, changed in the same step as the heights it may take, so it is never one that is gone.
+    @State private var detent: PresentationDetent = .medium
+    @State private var measured = false
+    @StateObject private var bar = AnswerBar()
+    private var pinsSend: Bool { card.isQuestion && !card.isApproval && !(card.questions ?? []).isEmpty }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if card.isQuestion {
-                    QuestionForm(card: card) { dismiss() }
+                    QuestionForm(card: card, bar: pinsSend ? bar : nil) { dismiss() }
                 } else {
                     Text(card.title.unbroken).font(.title3.weight(.semibold))
                         .fixedSize(horizontal: false, vertical: true)
@@ -25,7 +32,7 @@ struct CardSheet: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(edit.label).font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                             TextEditor(text: $editText)
-                                .frame(minHeight: 140)
+                                .frame(minHeight: 88)
                                 .padding(8)
                                 .scrollContentBackground(.hidden)
                                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.secondarySystemBackground)))
@@ -39,12 +46,42 @@ struct CardSheet: View {
                 }
             }
             .padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 20)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                // The card's own height plus its header row, within what a sheet may take.
+                // (Measured on the approval card: +96 left an empty band of about 45 points under the buttons.)
+                let want = h + 60
+                let next: CGFloat? = want > ScreenSize.height * 0.86 ? nil : max(220, want)
+                guard !measured || next != fitted else { return }
+                measured = true
+                fitted = next
+                // Pulled up to the whole screen stays there; otherwise the sheet takes the card's height.
+                // A card taller than a fitted sheet opens on the whole screen: half a form with its Send button out
+                // of sight read as broken.
+                if detent != .large { detent = next.map { .height($0) } ?? .large }
+            }
         }
         .scrollDismissesKeyboard(.interactively)
+        // A question's Send stays in sight at the foot, however long the form.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if pinsSend {
+                Button { bar.send() } label: {
+                    Text(bar.busy ? "Sending" : bar.ready ? "Send answer" : bar.missing.map { "Pick at least one \($0.lowercased())" } ?? "Answer every question")
+                        .frame(maxWidth: .infinity)
+                }
+                    .mainButton()
+                    .controlSize(.large)
+                    .disabled(!bar.ready || bar.busy)
+                    .padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 6)
+                    .background(Color(.systemBackground).ignoresSafeArea(edges: .bottom))
+            }
+        }
         // Who asks and Close share one row that stays put while the card scrolls. A navigation bar holding
         // only Close left an empty band the height of a title above the bot's name.
         .safeAreaBar(edge: .top, spacing: 0) { header }
-        .presentationDetents([.medium, .large])
+        // As tall as the card (two buttons do not get half a screen), and opaque: the list behind it blurred
+        // through the options.
+        .presentationDetents(fitted == nil ? [.medium, .large] : [.height(fitted!), .large], selection: $detent)
+        .presentationBackground(Color(.systemBackground))
         .presentationDragIndicator(.visible)
         .onAppear {
             // Once: coming back from Mail or Messages must not undo what was typed here.
@@ -67,7 +104,7 @@ struct CardSheet: View {
     private var header: some View {
         HStack(spacing: 10) {
             HStack(spacing: 10) {
-                if let a = store.agent(card.agent), a.kind != "group" { LiveFace(face: a.face, size: 38, state: store.faceState(a)) }
+                if let a = store.agent(card.agent), a.kind != "group" { LiveFace(face: a.face, size: 38, state: store.faceState(a), calm: true) }
                 else { AvatarView(agent: card.agent, size: 32) }
                 VStack(alignment: .leading, spacing: 0) {
                     Text(store.agent(card.agent)?.name ?? card.agent).font(.subheadline.weight(.semibold))
@@ -76,16 +113,18 @@ struct CardSheet: View {
             }
             .accessibilityElement(children: .combine)
             Spacer(minLength: 8)
+            // The same close button as Review's: one way to leave every card.
             Button { dismiss() } label: {
-                Text("Close").font(.body.weight(.medium))
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 44)
-                    .glassEffect(.regular.interactive(), in: .capsule)
-                    .contentShape(Capsule())
+                // A plain filled circle: glass on the white sheet drew a smudged halo around it.
+                Image(systemName: "xmark").font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(Color(.tertiarySystemFill)))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            // Never so large that it squeezes the bot's name out of the row.
-            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+            .accessibilityLabel("Close")
         }
         .padding(.horizontal, 20)
         // Clear of the grabber.
@@ -147,6 +186,16 @@ enum CardHeader {
         return t
     }
 
+    static func kindWord(_ c: Card) -> String {
+        switch c.kind {
+        case "alarm": return "Alarm"
+        case "approve": return "Decision"
+        case "draft": return "Draft to send"
+        case "do": return "To do"
+        default: return c.source == "desk" ? "To do" : "Needs you"
+        }
+    }
+
     @MainActor
     static func meta(_ c: Card, _ store: Store) -> String {
         let bot = store.agent(c.agent)
@@ -158,12 +207,13 @@ enum CardHeader {
             if c.isApproval { parts.append(own ? "Approval" : "Approval in \(thread)") }
             else { parts.append(own ? "Question" : "Asks in \(thread)") }
         } else {
-            if let desk = c.deskName, !desk.isEmpty, desk != who { parts.append(desk) }
-            if c.customer == true { parts.append(parts.isEmpty ? "Customer waiting" : "customer waiting") }
-            if let m = c.minutes, m > 0 { parts.append("\(Int(m.rounded()))\u{00A0}min") }
-            if c.kind == "alarm" { parts.append(parts.isEmpty ? "Alarm" : "alarm") }
+            // Every card says what kind it is first, then how old: "Alarm · 5h", "Decision · 4h".
+            parts.append(kindWord(c))
+            if c.customer == true { parts.append("customer waiting") }
+            if let desk = c.deskName, !desk.isEmpty, desk != who { parts.append("from \(desk)") }
         }
         parts.append(Ago.short(c.at))
+        if !c.isQuestion, let m = c.minutes, m > 0 { parts.append("takes \(Int(m.rounded()))\u{00A0}min") }
         return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
@@ -185,12 +235,13 @@ private struct QuietButton: ViewModifier {
     @Environment(\.colorScheme) private var scheme
 
     func body(content: Content) -> some View {
-        // White needs more of itself to show on the dark sheet than black does on the light one.
-        content.buttonStyle(.glass).background(Capsule().fill(Color.primary.opacity(scheme == .dark ? 0.16 : 0.08)))
+        // A plain filled capsule in the text colour's tint: the glass button on a faint fill vanished on the white
+        // sheet (white pills on white).
+        content.buttonStyle(.bordered).tint(Color.primary).foregroundStyle(Color.primary)
     }
 }
 
-private extension View {
+extension View {
     func mainButton() -> some View { modifier(MainButton()) }
     /// The quieter choices beside it (Done, Not now, Decline, Discard): the system's glass button, on a faint fill.
     /// On a half-height sheet in the dark appearance the glass alone had no visible edge, so they read as loose text.
@@ -223,10 +274,22 @@ private enum AnswerStash {
     }
 }
 
+/// Lets a sheet pin the form's Send button under the form, where it stays in sight however long the form is.
+@MainActor
+final class AnswerBar: ObservableObject {
+    @Published var ready = false
+    @Published var busy = false
+    /// What is still to answer, said on the button while it cannot send.
+    @Published var missing: String?
+    var send: () -> Void = {}
+}
+
 /// An agent's question (AskUserQuestion) or a command approval, answered from the phone. The form does not
 /// say where it was asked: the sheet and Review name the thread on the line above it, and the chat is the thread.
 struct QuestionForm: View {
     let card: Card
+    /// Set by a sheet that shows Send in a bar of its own.
+    var bar: AnswerBar? = nil
     var onDone: () -> Void
     @EnvironmentObject var store: Store
     @State private var picked: [String: Set<String>] = [:]
@@ -241,9 +304,22 @@ struct QuestionForm: View {
         VStack(alignment: .leading, spacing: 16) {
             if card.isApproval {
                 Text(card.title.unbroken).font(.headline).fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
+                if let command = card.detail, !command.isEmpty {
+                    Text(command)
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.secondarySystemBackground)))
+                        .textSelection(.enabled)
+                        .accessibilityLabel("Command: \(command)")
+                }
+                // Stacked full width, like every other card: the main choice, the other one under it.
+                VStack(spacing: 6) {
                     Button { decide("accept") } label: { Text("Approve").frame(maxWidth: .infinity) }
                         .mainButton()
+                    // Quieter than Approve: two equal slabs on a production deploy read as a coin toss.
                     Button(role: .destructive) { decide("decline") } label: { Text("Decline").frame(maxWidth: .infinity) }
                         .quietButton()
                 }
@@ -255,12 +331,14 @@ struct QuestionForm: View {
                     .font(.footnote).foregroundStyle(.secondary)
             } else {
                 ForEach(questions) { q in question(q) }
-                Button { submit() } label: {
-                    Text(busy ? "Sending" : "Send answer").frame(maxWidth: .infinity)
+                if bar == nil {
+                    Button { submit() } label: {
+                        Text(busy ? "Sending" : "Send answer").frame(maxWidth: .infinity)
+                    }
+                    .mainButton()
+                    .controlSize(.large)
+                    .disabled(!complete || busy)
                 }
-                .mainButton()
-                .controlSize(.large)
-                .disabled(!complete || busy)
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.circle.fill")
@@ -269,13 +347,23 @@ struct QuestionForm: View {
             }
         }
         .onAppear {
+            defer { tellBar() }
             // Back after an answer that failed: what was picked is still here. Only a card the server still lists
             // counts (a chat that has not caught up with an answer that did go through must not say it failed).
-            guard !busy, store.needs.contains(where: { $0.id == card.id }), let k = AnswerStash.last(card.id) else { return }
+            guard !busy, store.needs.contains(where: { $0.id == card.id }), let k = AnswerStash.last(card.id) else {
+                // A fresh form starts on the recommended choice of each single-choice question: one tap to send.
+                for q in questions where !q.multiSelect && (picked[q.id] ?? []).isEmpty {
+                    if let o = q.options.first(where: { Self.withoutRecommended($0.label) != $0.label }) { picked[q.id] = [o.label] }
+                }
+                return
+            }
             picked = k.picked
             custom = k.custom
             error = Self.notSent
         }
+        .onChange(of: complete) { _, _ in tellBar() }
+        .onChange(of: missing) { _, _ in tellBar() }
+        .onChange(of: busy) { _, _ in tellBar() }
         .onChange(of: store.doneLocally.contains(card.id)) { _, hidden in
             // Still on screen when the card is no longer held back: the form works again, and says so when the
             // server still lists the card (the answer failed).
@@ -303,7 +391,16 @@ struct QuestionForm: View {
                                              : (q.multiSelect ? "square" : "circle"))
                             .foregroundStyle(on ? Color.primary : Color.secondary)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(o.label).font(.subheadline.weight(.medium)).foregroundStyle(.primary)
+                            let shown = Self.withoutRecommended(o.label)
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(shown).font(.subheadline.weight(.medium)).foregroundStyle(.primary)
+                                // "(recommended)" in the label becomes a quiet tag; the answer sent keeps the label as is.
+                                if shown != o.label {
+                                    Text("Recommended").font(.caption2.weight(.semibold)).foregroundStyle(.green)
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(Capsule().fill(Color.green.opacity(0.14)))
+                                }
+                            }
                             if let d = o.description, !d.isEmpty { Text(d).font(.caption).foregroundStyle(.secondary) }
                         }
                         Spacer(minLength: 0)
@@ -311,7 +408,8 @@ struct QuestionForm: View {
                     .multilineTextAlignment(.leading)
                     .padding(.horizontal, 12).padding(.vertical, 10)
                     .frame(minHeight: 44)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.tertiarySystemFill)))
+                    // Picked: a tinted fill and a thin edge, not a heavy black border.
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(on ? Color.primary.opacity(0.07) : Color(.tertiarySystemFill)))
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(on ? Color.primary : Color.clear, lineWidth: 1.5))
                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
@@ -330,6 +428,18 @@ struct QuestionForm: View {
         .disabled(busy)
     }
 
+    static func withoutRecommended(_ label: String) -> String {
+        let r = label.replacingOccurrences(of: "\\s*[(\\[]recommended[)\\]]\\s*$", with: "", options: [.regularExpression, .caseInsensitive])
+        return r.isEmpty ? label : r
+    }
+
+    /// The first question still without an answer, named as the form names it ("Scope").
+    private var missing: String? {
+        questions.first { q in
+            (picked[q.id] ?? []).isEmpty && (custom[q.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.map { q in (q.header?.isEmpty == false ? q.header! : "the last question") }
+    }
+
     private var complete: Bool {
         questions.allSatisfy { q in
             !(picked[q.id] ?? []).isEmpty || !(custom[q.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -343,6 +453,15 @@ struct QuestionForm: View {
         var s = picked[q.id] ?? []
         if q.multiSelect { if s.contains(label) { s.remove(label) } else { s.insert(label) } } else { s = [label] }
         picked[q.id] = s
+    }
+
+    /// What the pinned Send button needs to know, and what it does.
+    private func tellBar() {
+        guard let bar else { return }
+        bar.ready = complete
+        bar.busy = busy
+        bar.missing = missing
+        bar.send = { submit() }
     }
 
     private func submit() {
@@ -455,36 +574,89 @@ struct CardButtons: View {
 
     private var actions: [CardAction] { Self.actions(for: card) }
 
+    /// What a button says. The stock "Handle it" says who does what: the card goes to its bot to be done now.
+    @MainActor
+    static func shown(_ a: CardAction, _ card: Card, _ store: Store) -> String {
+        guard a.kind == "handle", a.label == "Handle it" else { return a.label }
+        return "Ask \(store.agent(card.agent)?.name ?? "the bot") to handle this"
+    }
+
     var body: some View {
-        let main = actions.filter { $0.kind != "done" && $0.kind != "snooze" }
+        let main = actions.filter { $0.kind != "done" && $0.kind != "snooze" && $0.style != "destructive" }
+        let destructive = actions.filter { $0.style == "destructive" }
+        // One filled button: the one the source marked primary, else the first. The others are outlined, and a
+        // destructive one is red text at the bottom, so the loudest button is never the one that cancels.
+        let failed = (card.checks ?? []).filter { $0.state == "fail" }
+        // While a check fails, the other way (wait, keep, fix) is the loud button, and going ahead says "anyway"
+        // in orange.
+        let wanted = main.first(where: { $0.style == "primary" })?.id ?? main.first?.id
+        let primaryId = failed.isEmpty ? wanted : main.first(where: { $0.id != wanted })?.id
         VStack(spacing: 10) {
-            ForEach(main) { a in
+            if !failed.isEmpty {
+                Label(failed.count == 1 ? "One check failed: \(failed[0].label)" : "\(failed.count) checks failed", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // The loud button first, then the others in their own order.
+            let ordered = main.enumerated().sorted { ($0.element.id == primaryId ? 0 : 1, $0.offset) < ($1.element.id == primaryId ? 0 : 1, $1.offset) }.map(\.element)
+            ForEach(ordered) { a in
                 Button { tap(a) } label: {
                     HStack(spacing: 6) {
-                        if a.faceId == true { Image(systemName: "faceid").accessibilityHidden(true) }
-                        Text(a.label)
+                        if a.id == wanted && !failed.isEmpty {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).accessibilityHidden(true)
+                        } else if a.faceId == true {
+                            Image(systemName: "faceid").accessibilityHidden(true)
+                        }
+                        Text(Self.shown(a, card, store) + (a.id == wanted && !failed.isEmpty ? " anyway" : ""))
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
-                // A second choice is a softer fill of the same colour, still dark enough for its label
-                // (the system's secondary grey left white text at about 3 to 1 in the light appearance).
-                .tint(a.style == "destructive" ? Color.red : a.style == "primary" || main.count == 1 ? Color.primary : Color.primary.opacity(0.6))
-                // White on red in both appearances; the other fills flip with the appearance.
-                .foregroundStyle(a.style == "destructive" ? Color.white : Color(.systemBackground))
+                .modifier(CardButtonLook(primary: a.id == primaryId, warn: !failed.isEmpty && a.id == wanted))
                 .accessibilityHint(a.faceId == true ? "Asks for Face ID first" : "")
             }
-            HStack(spacing: 10) {
-                if let done = actions.first(where: { $0.kind == "done" }) {
-                    Button { tap(done) } label: { Text(done.label).frame(maxWidth: .infinity) }.quietButton()
+            let done = actions.first(where: { $0.kind == "done" })
+            let snooze = actions.contains(where: { $0.kind == "snooze" })
+            if main.count > 1 || !destructive.isEmpty {
+                // A real decision (its own choices): those are the buttons. Done, Not now and a destructive choice
+                // wait in one quiet menu under them, instead of five buttons stacked.
+                Menu {
+                    if let done { Button { tap(done) } label: { Label(done.label, systemImage: "checkmark") } }
+                    if snooze {
+                        Menu {
+                            ForEach(Snooze.options(store.settings)) { o in
+                                Button(o.label) { onAct(); store.act(card, "snooze", until: o.until, label: "Snoozed: \(o.label.lowercased())") }
+                            }
+                        } label: { Label("Not now", systemImage: "moon.zzz") }
+                    }
+                    ForEach(destructive) { a in
+                        Button(role: .destructive) { tap(a) } label: { Text(a.label) }
+                    }
+                } label: {
+                    Label("More", systemImage: "ellipsis").font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity).frame(minHeight: 36)
                 }
-                if actions.contains(where: { $0.kind == "snooze" }) {
-                    Menu {
-                        ForEach(Snooze.options(store.settings)) { o in
-                            Button(o.label) { onAct(); store.act(card, "snooze", until: o.until, label: "Snoozed: \(o.label.lowercased())") }
-                        }
-                    } label: { Text("Not now").frame(maxWidth: .infinity) }
-                    .quietButton()
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            } else {
+                ForEach(destructive) { a in
+                    Button(role: .destructive) { tap(a) } label: { Text(a.label).frame(maxWidth: .infinity).frame(minHeight: 44) }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.red)
+                        .font(.body.weight(.medium))
+                }
+                HStack(spacing: 10) {
+                    if let done {
+                        Button { tap(done) } label: { Text(done.label).frame(maxWidth: .infinity) }.quietButton()
+                    }
+                    if snooze {
+                        Menu {
+                            ForEach(Snooze.options(store.settings)) { o in
+                                Button(o.label) { onAct(); store.act(card, "snooze", until: o.until, label: "Snoozed: \(o.label.lowercased())") }
+                            }
+                        } label: { Text("Not now").frame(maxWidth: .infinity) }
+                        .quietButton()
+                    }
                 }
             }
         }
@@ -494,5 +666,15 @@ struct CardButtons: View {
     private func tap(_ a: CardAction) {
         onAct()
         store.act(card, a.id, text: text)
+    }
+}
+
+/// The filled main button, or an outlined one beside it.
+private struct CardButtonLook: ViewModifier {
+    let primary: Bool
+    /// Going ahead although a check failed: orange, so it never passes for the safe choice.
+    var warn = false
+    func body(content: Content) -> some View {
+        if primary { content.mainButton() } else { content.quietButton() }
     }
 }

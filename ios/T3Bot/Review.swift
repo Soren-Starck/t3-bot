@@ -7,6 +7,7 @@ import UIKit
 struct ReviewView: View {
     @EnvironmentObject var store: Store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var drag: CGSize = .zero
     /// True while a finger drags the card. It falls back to false by itself when the system cancels the drag (a call
     /// coming in, the app switcher), which is the only sign SwiftUI gives of a cancelled drag.
@@ -22,7 +23,20 @@ struct ReviewView: View {
     /// Which way the card would go if let go now; a tick under the finger each time it changes.
     @State private var armed: String?
 
-    private var cards: [Card] { store.needs }
+    /// A card picked from the list (or from "Also from" on a card): it goes on top of the deck.
+    @State private var focus: String?
+    /// The same cards as a list, grouped by how soon they need you: one place for the whole queue, two ways to see it.
+    @State private var listMode = false
+
+    private var cards: [Card] {
+        let all = store.needs
+        guard let focus, let i = all.firstIndex(where: { $0.id == focus }) else { return all }
+        var out = all
+        out.insert(out.remove(at: i), at: 0)
+        return out
+    }
+    /// The top card's height, for the blank edge of the one behind it.
+    @State private var topHeight: CGFloat = 0
     private var gone: Int { handled.filter { id in !cards.contains { $0.id == id } }.count }
     private var total: Int { gone + cards.count }
 
@@ -31,8 +45,8 @@ struct ReviewView: View {
             HStack {
                 Button { dismiss() } label: {
                     Image(systemName: "xmark").font(.system(size: 15, weight: .semibold))
-                        .frame(width: 40, height: 40)
-                        .glassEffect(.regular.interactive(), in: .circle)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(Color(.tertiarySystemFill)))
                         // The circle stays 40 pt; the finger gets 44.
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
@@ -40,7 +54,10 @@ struct ReviewView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close")
                 Spacer()
-                if !cards.isEmpty {
+                if listMode {
+                    Text(cards.count == 1 ? "1 needs you" : "\(cards.count) need you")
+                        .font(.subheadline.weight(.semibold))
+                } else if !cards.isEmpty {
                     Text("\(gone + 1) of \(total)")
                         .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
                         .contentTransition(.numericText())
@@ -48,23 +65,46 @@ struct ReviewView: View {
                         .accessibilityLabel("Card \(gone + 1) of \(total)")
                 }
                 Spacer()
-                Color.clear.frame(width: 44, height: 44)
+                // Cards or list: the same queue.
+                Button {
+                    Haptics.tap()
+                    withAnimation(.spring(duration: 0.3)) { listMode.toggle() }
+                } label: {
+                    Image(systemName: listMode ? "rectangle.stack" : "list.bullet").font(.system(size: 15, weight: .semibold))
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(Color(.tertiarySystemFill)))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .opacity(cards.isEmpty ? 0 : 1)
+                .accessibilityLabel(listMode ? "Show as cards" : "Show as a list")
             }
             .padding(.horizontal, 10)
+            if listMode {
+                ReviewList { id in
+                    focus = id
+                    withAnimation(.spring(duration: 0.3)) { listMode = false }
+                }
+            } else {
             // How far through the stack this sitting is.
             if total > 0 {
-                ProgressView(value: Double(gone), total: Double(max(total, 1)))
+                // Where this card sits in the stack: the first of thirteen already shows a little progress.
+                ProgressView(value: Double(min(gone + 1, total)), total: Double(max(total, 1)))
                     .tint(.primary)
                     .padding(.horizontal, 20).padding(.top, 4)
                     .animation(.spring(duration: 0.4), value: gone)
                     .accessibilityHidden(true)
             }
 
-            ZStack {
+            // Top-aligned under the progress line: a short card no longer floats in the middle of the screen.
+            ZStack(alignment: .top) {
                 if let next = cards.dropFirst().first {
                     // The card behind comes forward as the top one is pulled away, so it is already in place
-                    // when it becomes the top card.
-                    ReviewCard(card: next)
+                    // when it becomes the top card. At rest only its edge shows under the top card (a stack), as a
+                    // blank card of the top one's height: its own content peeking out read as a glitch.
+                    ReviewCard(card: next).opacity(Double(pull))
+                        .offset(y: 18 * (1 - pull))
                         .scaleEffect(0.95 + 0.05 * pull)
                         .opacity(0.6 + 0.4 * Double(pull))
                         .allowsHitTesting(false)
@@ -72,7 +112,10 @@ struct ReviewView: View {
                 }
                 if let top = cards.first {
                     // An answered question counts as handled too, so the counter and the line move on with it.
-                    ReviewCard(card: top) { handled.insert(top.id) }
+                    ReviewCard(card: top, onAnswer: { handled.insert(top.id) }, onJump: { id in
+                        withAnimation(.spring(duration: 0.35)) { focus = id }
+                    })
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { topHeight = $0 }
                         .overlay(alignment: .top) { hint(for: top) }
                         .offset(drag)
                         .rotationEffect(.degrees(Double(drag.width / 22)))
@@ -89,19 +132,27 @@ struct ReviewView: View {
                         Button("Close") { dismiss() }.buttonStyle(.glass).padding(.top, 8)
                     }
                     .padding(.horizontal, 24)
+                    .frame(maxHeight: .infinity)
                 }
             }
             .padding(.horizontal, 16)
-            .frame(maxHeight: .infinity)
-            // "Marked done · Undo" sits over the foot of the card, never over the buttons under it.
-            .overlay(alignment: .bottom) { ToastBar(bottom: 12).environmentObject(store) }
-            // Room between the progress line, the card and the buttons: the card touched both. After the
-            // overlay, so the bar above keeps its place over the card's foot.
-            .padding(.vertical, 12)
+            .frame(maxHeight: cards.isEmpty ? .infinity : nil, alignment: .top)
+            // Room between the progress line and the card.
+            .padding(.top, 12)
 
-            if let top = cards.first { buttons(top).padding(.horizontal, 16).padding(.bottom, 12) }
+            if let top = cards.first {
+                // The buttons right under the card (past the deck's edges), and under them what comes next: the
+                // screen holds the queue, not an empty band.
+                buttons(top).padding(.horizontal, 16).padding(.top, 40)
+                upNext.padding(.horizontal, 16).padding(.top, 20)
+                Spacer(minLength: 8)
+            }
+            }
         }
+        // "Marked done · Undo" at the foot of the screen.
+        .overlay(alignment: .bottom) { ToastBar(bottom: 12).environmentObject(store) }
         .background(Color(.systemGroupedBackground))
+        .onAppear { if store.reviewAsList { listMode = true; store.reviewAsList = false } }
         .onChange(of: dragging) { _, now in
             // The drag is over. When it ended the usual way, onEnded has dealt with the card. When the system
             // cancelled it, nothing has, and the card would stay where the finger left it: it goes back to the centre.
@@ -203,7 +254,8 @@ struct ReviewView: View {
 
     private func fly(_ c: Card, out: CGSize, then act: @escaping () -> Void) {
         leaving = c.id
-        withAnimation(.easeIn(duration: 0.22)) { drag = out }
+        // Reduce Motion: the card leaves without flying across the screen.
+        withAnimation(reduceMotion ? nil : .easeIn(duration: 0.22)) { drag = out }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
             var tx = Transaction(); tx.disablesAnimations = true
             withTransaction(tx) { drag = .zero }
@@ -218,7 +270,7 @@ struct ReviewView: View {
         let right = drag.width > 40
         let left = drag.width < -40
         let up = !right && !left && drag.height < -50
-        let label: String? = right ? primary(c)?.label : left ? "Not now" : up ? done(c)?.label : nil
+        let label: String? = right ? primary(c).map { CardButtons.shown($0, c, store) } : left ? "Not now" : up ? done(c)?.label : nil
         if let label {
             Label(label, systemImage: right ? "arrow.right" : left ? "moon.zzz.fill" : "checkmark")
                 .font(.headline)
@@ -237,12 +289,43 @@ struct ReviewView: View {
         }
     }
 
+    /// The next few cards, quietly, under the buttons; a tap brings one to the top.
+    @ViewBuilder
+    private var upNext: some View {
+        let next = Array(cards.dropFirst().prefix(3))
+        if !next.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Up next").font(.footnote.weight(.semibold)).foregroundStyle(.secondary).padding(.bottom, 6)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(next) { c in
+                    Button {
+                        Haptics.tap()
+                        withAnimation(.spring(duration: 0.35)) { focus = c.id }
+                    } label: {
+                        HStack(spacing: 10) {
+                            AvatarView(agent: c.agent, size: 24)
+                            Text(c.title).font(.subheadline).foregroundStyle(.primary).lineLimit(1)
+                            Spacer(minLength: 6)
+                            KindTag(card: c)
+                        }
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(CardText.spoken(c, store))
+                    .accessibilityHint("Brings this card to the top")
+                    if c.id != next.last?.id { Divider().padding(.leading, 34) }
+                }
+            }
+        }
+    }
+
     /// The card's main action on its own full-width row (its label never gets cut), Not now and Done under it.
     private func buttons(_ c: Card) -> some View {
         VStack(spacing: 10) {
             if let p = primary(c) {
                 Button { finish(c, p, out: CGSize(width: 700, height: 0)) } label: {
-                    Label(p.label, systemImage: p.faceId == true ? "faceid" : "arrow.right")
+                    Label(CardButtons.shown(p, c, store), systemImage: p.faceId == true ? "faceid" : "arrow.right")
                         .lineLimit(1).minimumScaleFactor(0.85)
                         .frame(maxWidth: .infinity)
                 }
@@ -251,13 +334,14 @@ struct ReviewView: View {
             }
             HStack(spacing: 10) {
                 Button { snooze(c, out: CGSize(width: -700, height: 0)) } label: {
-                    Label("Not now", systemImage: "arrow.left").frame(maxWidth: .infinity)
+                    Label("Not now", systemImage: "moon.zzz").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glass)
                 .accessibilityHint("Comes back \(Self.morningWords(Snooze.options(store.settings).first { $0.id == "morning" }))")
                 if let d = done(c) {
                     Button { finish(c, d, out: CGSize(width: 0, height: -900)) } label: {
-                        Label(d.label, systemImage: "arrow.up").frame(maxWidth: .infinity)
+                        // "Done" read as "close this screen".
+                        Label(d.label == "Done" ? "Mark handled" : d.label, systemImage: "checkmark").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.glass)
                 }
@@ -273,17 +357,39 @@ struct ReviewCard: View {
     let card: Card
     /// The question on this card was answered from its form.
     var onAnswer: () -> Void = {}
+    /// One of the bot's other cards was tapped: it comes to the top of the deck.
+    var onJump: (String) -> Void = { _ in }
     @EnvironmentObject var store: Store
 
     var body: some View {
+        // As tall as what it says; it scrolls only when that does not fit. (ViewThatFits measured the text on
+        // one line and cut it short.)
         ScrollView {
+            content.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxHeight: height > 0 ? height : .infinity)
+        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Color(.separator), lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .black.opacity(0.08), radius: 16, y: 6)
+    }
+
+    @State private var height: CGFloat = 0
+
+    private var content: some View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
-                    AvatarView(agent: card.agent, size: 40)
+                    if let a = store.agent(card.agent), a.kind != "group" {
+                        LiveFace(face: a.face, size: 44, state: store.faceState(a), calm: true)
+                    } else {
+                        AvatarView(agent: card.agent, size: 40)
+                    }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(store.agent(card.agent)?.name ?? card.agent).font(.subheadline.weight(.semibold))
                         Text(CardHeader.meta(card, store)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
+
                 }
                 .accessibilityElement(children: .combine)
                 if card.isQuestion {
@@ -304,13 +410,52 @@ struct ReviewCard: View {
                         }
                     }
                 }
+                // What else this bot waits on you for: often the other half of the same story (the alarm and the
+                // fix waiting to ship). At the card's foot.
+                let more = store.needs.filter { $0.agent == card.agent && $0.id != card.id }
+                if !more.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Also from \(store.agent(card.agent)?.name ?? "this bot")").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        ForEach(more.prefix(3)) { m in
+                            Button { Haptics.tap(); onJump(m.id) } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: CardText.mark(m)?.symbol ?? "checklist").font(.caption).foregroundStyle(.secondary).frame(width: 16)
+                                    Text(m.title).font(.subheadline).lineLimit(1).foregroundStyle(.primary)
+                                    Spacer(minLength: 4)
+                                    Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
             }
             .padding(20)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+
+/// The queue as a list inside Review, grouped by how soon each card needs you; a tap puts that card on top of the deck.
+struct ReviewList: View {
+    @EnvironmentObject var store: Store
+    var onPick: (String) -> Void
+
+    var body: some View {
+        List {
+            ForEach(AllNeedsView.groups, id: \.0) { title, ranks in
+                let items = store.needs.filter { ranks.contains(min(max($0.rank, 0), 4)) }
+                if !items.isEmpty {
+                    Section {
+                        ForEach(items) { c in CardRow(card: c) { onPick($0.id) } }
+                    } header: {
+                        ListHeader(text: "\(title) · \(items.count)")
+                    }
+                }
+            }
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Color(.separator), lineWidth: 0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .shadow(color: .black.opacity(0.08), radius: 16, y: 6)
+        .scrollContentBackground(.hidden)
     }
 }

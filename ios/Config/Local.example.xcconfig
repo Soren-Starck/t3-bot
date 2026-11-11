@@ -1,0 +1,67 @@
+// Your own build values. This file is an example and is never read by the build.
+//
+// The quick way: run ios/scripts/setup.sh, which asks for the two values every build needs and writes
+// ios/Config/Local.xcconfig for you. The other way: copy this file to ios/Config/Local.xcconfig, fill in
+// T3BOT_TEAM and T3BOT_BUNDLE_ID, then run `cd ios && xcodegen generate`.
+//
+// Local.xcconfig is ignored by git and wins over the defaults in T3Bot.xcconfig. Keep it to yourself: it can
+// hold a server token.
+
+// ---- Needed for a build on an iPhone ----
+
+// Your Apple developer team: ten letters and digits. Find it on developer.apple.com > Account > Membership
+// details > Team ID, or in Xcode > Settings > Accounts > your team. It must be a paid membership: a free
+// account cannot sign the notification entitlements.
+T3BOT_TEAM = ABCDE12345
+
+// An identifier of your own for the app, in reverse-domain form. Anything nobody else uses. The three
+// extensions become <this>.notify, <this>.widgets and <this>.share, and the Keychain group they share with
+// the app becomes <team prefix>.<this>.shared, so this one value moves every identifier.
+T3BOT_BUNDLE_ID = com.yourname.t3bot
+
+// Automatic: Xcode makes the certificates and the four provisioning profiles for your team. Leave it.
+T3BOT_SIGN_STYLE = Automatic
+
+// ---- Notifications when the app is paired straight with T3 Code (optional) ----
+
+// The host name of your own push sender (no https://, no path). An app signed by your team can only be
+// rung with a push key from your team, so the sender is yours to deploy: push/README.md, about ten minutes
+// on Vercel. Empty: the app works, and nothing rings until you open it.
+T3BOT_PUSH_HOST =
+
+// ---- Rarely needed ----
+
+// Apple's push environment. The default, sandbox, is right for a build from Xcode onto your own iPhone.
+// TestFlight and App Store builds need production.
+// T3BOT_APNS_ENV = production
+
+// Manual signing, for profiles you made yourself on developer.apple.com > Profiles. Set T3BOT_SIGN_STYLE to
+// Manual and give the four profile names as shown there (setup.sh --manual writes these).
+// T3BOT_SIGN_STYLE = Manual
+// T3BOT_SIGN_IDENTITY = Apple Development
+// T3BOT_PROFILE_APP = My T3 Bot
+// T3BOT_PROFILE_NOTIFY = My T3 Bot Notify
+// T3BOT_PROFILE_WIDGETS = My T3 Bot Widgets
+// T3BOT_PROFILE_SHARE = My T3 Bot Share
+
+// A T3 Bot server connection carried by the build, so the app skips its pairing screen. Leave both out to
+// start on the pairing screen, which is what you want with T3 Code alone. ios/scripts/write-local-config.sh
+// writes them from the server's token file. In an xcconfig, // starts a comment, so a URL is written with
+// $() between the slashes.
+// T3BOT_URL = https:/$()/my-mac.example.ts.net:8809
+// T3BOT_TOKEN = <the content of ~/.config/t3bot/token on the server Mac>
+
+// Only for ios/scripts/run-on-iphone.sh: the iPhone to install on, when several are connected. Its
+// identifier is in Xcode > Window > Devices and Simulators, or `xcrun devicectl list devices`.
+// T3BOT_DEVICE = 00008000-0000000000000000
+
+// Only for ios/scripts/install-on-iphone.sh, which builds on another Mac over ssh.
+// T3BOT_BUILD_HOST = my-other-mac
+// T3BOT_BUILD_DIR = t3bot-build
+// T3BOT_SERVER_HOST = my-server-mac
+
+// An App Store Connect API key (appstoreconnect.apple.com > Users and Access > Integrations), for a Mac
+// whose Xcode has no Apple account signed in. The key file is expected at
+// ~/.appstoreconnect/private_keys/AuthKey_<key id>.p8 unless T3BOT_ASC_KEY_PATH says otherwise.
+// T3BOT_ASC_KEY_ID = XXXXXXXXXX
+// T3BOT_ASC_ISSUER_ID = 00000000-0000-0000-0000-000000000000

@@ -2,7 +2,8 @@
  * T3 Bot demo server: the same HTTP API as server/t3bot.ts, answered from memory. No T3 Code, no config file,
  * no database, no pushes. It is what you point the app at to try it, and what the screenshots are made from.
  *
- *   bun server/demo.ts [--port 8810] [--host 0.0.0.0] [--frozen] [--no-banner]
+ *   bun server/demo.ts [--port 8810] [--lan | --host <address>] [--frozen] [--no-banner]
+ *   It listens on 127.0.0.1 unless --lan, --host or T3BOT_DEMO_HOST says otherwise (the token "demo" is public).
  *
  * Token: `demo`. State lives in memory and comes back fresh on every start (or POST /v1/demo/reset).
  *
@@ -21,6 +22,7 @@ import { answerScript, cardScript, decisionScript, scriptFor, type Script } from
 import { generated } from './demo-png'
 import { VERSION } from './config'
 import { preview, quickReplies, snippet } from './text'
+import { BadInput, overLimit, readBody, tidyNote, tooLarge, wrongMethod } from './guard'
 import { CHIEF, DEFAULT_ACTIONS, USER, seed, type Action, type Bot, type Card, type Entry, type EntryImage, type Run, type Settings, type World } from './demo-world'
 
 const ROOT = join(import.meta.dir, '..')
@@ -32,7 +34,10 @@ const args = process.argv.slice(2)
 const flag = (name: string) => args.includes(`--${name}`)
 const option = (name: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : undefined }
 const PORT = Number(option('port') ?? process.env.T3BOT_DEMO_PORT ?? 8810)
-const HOST = option('host') ?? '0.0.0.0'
+// This computer only, unless asked: the demo's token is public ("demo"), so anyone on the network could use an open one.
+// --lan (or --host 0.0.0.0, or T3BOT_DEMO_HOST) opens it, for a phone on the same Wi-Fi.
+const HOST = option('host') ?? (flag('lan') ? '0.0.0.0' : process.env.T3BOT_DEMO_HOST || '127.0.0.1')
+const OPEN = !/^(127\.|localhost$|::1$)/.test(HOST)
 const FROZEN = flag('frozen')
 
 // The same answers as the real server for a request it would refuse.
@@ -245,38 +250,42 @@ function act(id: string, actionId: string, body: any): { ok: boolean; error?: st
 }
 
 /** A note from an agent (`t3bot notify`): a card on the list, or a line in the evening digest. */
-function addNote(n: any): { id: string; agent: string; kind: string } {
-  const kind = String(n.kind ?? 'know')
-  if (!['alarm', 'approve', 'do', 'know', 'draft'].includes(kind)) throw new BadRequest('kind must be alarm, approve, do, know or draft')
-  if (!n.title) throw new BadRequest('title is required')
+function addNote(raw: any): { id: string; agent: string; kind: string } {
+  // Kind and title checked, every text a string of a bounded length, exactly as the real server stores it.
+  const n = tidyNote(raw), kind: string = n.kind
   const agent = botById(String(n.agent ?? '')) ? String(n.agent) : CHIEF
   const id = n.key ? `${agent}:${n.key}` : crypto.randomUUID()
   const at = iso(Date.now())
   if (kind === 'know') {
     world.notes = world.notes.filter((x) => x.id !== id)
-    world.notes.push({ id, agent, kind, title: String(n.title), body: n.body ? String(n.body) : null, created_at: at, link: n.link ? String(n.link) : null, key: n.key ? String(n.key) : null })
+    world.notes.push({ id, agent, kind, title: n.title, body: n.body ?? null, created_at: at, link: n.link ?? null, key: n.key ?? null })
+    // Everything lives in memory, and anyone on the network may post: the newest 200 are kept.
+    if (world.notes.length > 200) world.notes.splice(0, world.notes.length - 200)
     return { id, agent, kind }
   }
   const actions: Action[] | undefined = kind === 'draft' ? undefined
     : Array.isArray(n.actions) && n.actions.length
-      ? [...n.actions.map((a: any, i: number): Action => ({
-        id: String(a.id ?? `a${i}`), label: String(a.label), kind: a.handler ? 'command' : 'message', style: i === 0 ? 'primary' : 'plain',
-        faceId: !!(a.faceId ?? n.faceId), message: a.message ? String(a.message) : undefined, handler: a.handler ? String(a.handler) : undefined,
+      ? [...n.actions.map((a, i): Action => ({
+        id: a.id, label: a.label, kind: a.handler ? 'command' : 'message', style: i === 0 ? 'primary' : 'plain',
+        faceId: !!(a.faceId ?? n.faceId), message: a.message, handler: a.handler,
       })), { id: 'done', label: 'Done', kind: 'done' }, { id: 'snooze', label: 'Not now', kind: 'snooze' }]
       : DEFAULT_ACTIONS(!!n.faceId)
   const card: Card = {
     id: `note:${id}`, source: 'note', agent, rank: kind === 'alarm' ? 0 : kind === 'do' ? 2 : 1,
     title: String(n.title), detail: n.body ? String(n.body) : undefined, at, kind, link: n.link ? String(n.link) : undefined, key: n.key ? String(n.key) : undefined,
-    draft: kind === 'draft' ? (n.draft ?? {}) : undefined,
-    fields: kind !== 'draft' && Array.isArray(n.fields) ? n.fields : undefined,
-    checks: kind !== 'draft' && Array.isArray(n.checks) ? n.checks : undefined,
-    edit: kind !== 'draft' && n.edit?.text !== undefined ? { label: String(n.edit.label ?? 'Text'), text: String(n.edit.text) } : undefined,
+    draft: kind === 'draft' ? n.draft : undefined,
+    fields: kind !== 'draft' ? n.fields : undefined,
+    checks: kind !== 'draft' ? (n.checks as Card['checks']) : undefined,
+    edit: kind !== 'draft' ? n.edit : undefined,
     actions,
   }
   world.cards = world.cards.filter((c) => c.id !== card.id)
   world.removed.delete(card.id)
   world.snoozed.delete(card.id)
   world.cards.push(card)
+  // In memory, like the notes: past 200 cards from notify, the oldest goes.
+  const posted = world.cards.filter((c) => c.source === 'note')
+  if (posted.length > 200) world.cards = world.cards.filter((c) => c !== posted[0])
   return { id, agent, kind }
 }
 
@@ -410,8 +419,10 @@ function newAgent(body: any) {
 // ---------- uploads and pictures ----------
 
 function saveImages(images: any[]): EntryImage[] {
-  return images.slice(0, 6).map((b64: any) => {
-    const bytes = new Uint8Array(Buffer.from(String(b64), 'base64'))
+  return images.slice(0, 6).filter((b64) => typeof b64 === 'string' && b64).map((b64: string) => {
+    // The real server's limit: twelve megabytes a photo.
+    if (b64.length > 12 * 1024 * 1024 * 1.4) throw new BadInput('a photo is larger than 12 MB')
+    const bytes = new Uint8Array(Buffer.from(b64, 'base64'))
     const png = bytes[0] === 0x89
     const path = `/demo/uploads/${nextId('photo')}.${png ? 'png' : 'jpg'}`
     world.uploads.set(path, { bytes, type: png ? 'image/png' : 'image/jpeg' })
@@ -470,7 +481,7 @@ function search(q: string) {
 
 // ---------- HTTP ----------
 
-const json = (x: unknown, status = 200) => new Response(JSON.stringify(x), { status, headers: { 'content-type': 'application/json' } })
+const json = (x: unknown, status = 200, more: Record<string, string> = {}) => new Response(JSON.stringify(x), { status, headers: { 'content-type': 'application/json', ...more } })
 
 async function gz(req: Request, res: Response): Promise<Response> {
   if (!(req.headers.get('accept-encoding') ?? '').includes('gzip')) return res
@@ -487,6 +498,7 @@ async function route(req: Request): Promise<Response> {
   const path = url.pathname
   const GET = req.method === 'GET', POST = req.method === 'POST'
   if (path === '/health') return json({ ok: true })
+  // Faces need no token, as on the real server: the app's share extension loads them as plain URLs (see t3bot.ts).
   let m = path.match(/^\/v1\/avatars\/((?:skins\/)?[a-z0-9-]+)\.png$/)
   if (m && GET) return avatar(m[1]) ?? json({ error: 'no avatar' }, 404)
   if (req.headers.get('authorization') !== `Bearer ${TOKEN}`) return json({ error: 'unauthorized' }, 401)
@@ -495,7 +507,17 @@ async function route(req: Request): Promise<Response> {
   if (!started) { started = true; if (!FROZEN) world = seed(Date.now()) }
   advance()
 
-  const body: any = POST ? await req.json().catch(() => ({})) : {}
+  // The same refusals as the real server (guard.ts): a size per route, and a body that is a JSON object or nothing.
+  let body: any = {}
+  if (POST) {
+    if (overLimit(path, req.headers.get('content-length'))) return json({ ok: false, error: tooLarge(path) }, 413)
+    let raw = ''
+    try { raw = await req.text() } catch { return json({ ok: false, error: 'the request could not be read (too large?)' }, 413) }
+    if (overLimit(path, null, raw.length)) return json({ ok: false, error: tooLarge(path) }, 413)
+    const read = readBody(raw)
+    if (read.error !== undefined) return json({ ok: false, error: read.error }, 400)
+    body = read.body
+  }
   try {
     if (path === '/v1/hello' && GET) return json({ ok: true, name: 'T3 Bot', version: VERSION, user: USER, demo: true, push: false, chief: CHIEF, bots: world.bots.length, t3: { ok: true } })
     if (path === '/v1/home' && GET) return json(home())
@@ -651,9 +673,12 @@ async function route(req: Request): Promise<Response> {
       world = seed(Date.now())
       return json({ ok: true })
     }
+    // As on the real server: a path that exists, asked with a method it does not take, is 405 with the ones it takes.
+    const allow = wrongMethod(path, req.method, [[/^\/v1\/(cards\/undo|demo\/reset)$/, 'POST']])
+    if (allow) return json({ ok: false, error: `${path} takes ${allow.replace(', ', ' or ')}, not ${req.method}` }, 405, { allow })
     return json({ error: 'not found' }, 404)
   } catch (e) {
-    if (e instanceof BadRequest) return json({ ok: false, error: e.message }, 400)
+    if (e instanceof BadRequest || e instanceof BadInput) return json({ ok: false, error: e.message }, 400)
     log('request error', { path, e: String(e) })
     return json({ ok: false, error: String(e instanceof Error ? e.message : e) }, 500)
   }
@@ -668,6 +693,10 @@ Bun.serve({
   fetch: async (req) => (req.method === 'GET' ? gz(req, await route(req)) : route(req)),
 })
 
+// Always said, banner or not: where it listens, and how to change that.
+console.log(OPEN
+  ? `Demo server listening on ${HOST}:${PORT}: open to your network over plain http, with the public token "demo". Use it on a network you trust.`
+  : `Demo server listening on ${HOST}:${PORT}: this computer only. For a phone on the same Wi-Fi, start it with --lan (or T3BOT_DEMO_HOST=0.0.0.0).`)
 if (!flag('no-banner')) {
   const lan = Object.values(networkInterfaces()).flat().find((i) => i && i.family === 'IPv4' && !i.internal)?.address
   const base = `http://${HOST === '0.0.0.0' ? lan ?? '127.0.0.1' : HOST}:${PORT}`

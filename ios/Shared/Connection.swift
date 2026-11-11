@@ -1,7 +1,8 @@
 import Foundation
 import Security
 
-/// Where this phone's T3 Bot server is, and the token that opens it.
+/// Where this phone's bots are, and the token that opens it: a T3 Bot server (`kind == .server`), or T3 Code
+/// itself (`.t3code`, paired with one of its codes; ios/Direct talks to it).
 ///
 /// The app saves a pairing to its UserDefaults and mirrors it to a Keychain access group it shares with its
 /// extensions (notifications, widgets, share sheet), which cannot read the app's defaults. A build can also
@@ -10,11 +11,29 @@ import Security
 ///
 /// Compiled into all four targets. Foundation and Security only.
 struct Connection: Equatable {
+    enum Kind: String { case server, t3code }
+
     let url: URL
     let token: String
+    var kind: Kind = .server
+    /// T3 Code's environment id and name (`My Mac`), for a `.t3code` pairing.
+    var environmentId: String? = nil
+    var name: String? = nil
+
+    init(url: URL, token: String, kind: Kind = .server, environmentId: String? = nil, name: String? = nil) {
+        self.url = url
+        self.token = token
+        self.kind = kind
+        self.environmentId = environmentId
+        self.name = name
+    }
+
+    /// True when the app talks to T3 Code directly, with no T3 Bot server.
+    var isDirect: Bool { kind == .t3code }
 
     /// What the screens call this server: its host, with the port when it is not the default one.
     var label: String {
+        if isDirect, let name, !name.isEmpty { return name }
         guard let host = url.host else { return url.absoluteString }
         if let port = url.port { return "\(host):\(port)" }
         return host
@@ -44,6 +63,9 @@ struct Connection: Equatable {
     private enum Keys {
         static let url = "t3bot.connection.url"
         static let token = "t3bot.connection.token"
+        static let kind = "t3bot.connection.kind"
+        static let environment = "t3bot.connection.environment"
+        static let name = "t3bot.connection.name"
         /// Set by Disconnect, so a build that carries a connection does not reconnect by itself.
         static let off = "t3bot.connection.off"
     }
@@ -55,7 +77,12 @@ struct Connection: Equatable {
         if let c = fromArguments { return (c, .arguments) }
         #endif
         let d = UserDefaults.standard
-        if let c = make(d.string(forKey: Keys.url), d.string(forKey: Keys.token)) { return (c, .paired) }
+        if var c = make(d.string(forKey: Keys.url), d.string(forKey: Keys.token)) {
+            c.kind = Kind(rawValue: d.string(forKey: Keys.kind) ?? "") ?? .server
+            c.environmentId = d.string(forKey: Keys.environment)
+            c.name = d.string(forKey: Keys.name)
+            return (c, .paired)
+        }
         if d.bool(forKey: Keys.off) { return nil }
         switch Keychain.read() {
         case let .paired(c): return (c, .paired)
@@ -90,7 +117,10 @@ struct Connection: Equatable {
             guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
             return args[i + 1]
         }
-        return make(value("-t3botURL"), value("-t3botToken"))
+        guard var c = make(value("-t3botURL"), value("-t3botToken")) else { return nil }
+        // `-t3botKind t3code -t3botEnv <environment id>`: a T3 Code environment, for screen checks of the direct mode.
+        if value("-t3botKind") == "t3code" { c.kind = .t3code; c.environmentId = value("-t3botEnv"); c.name = value("-t3botName") }
+        return c
     }
     #endif
 
@@ -98,6 +128,9 @@ struct Connection: Equatable {
         let d = UserDefaults.standard
         d.set(c.url.absoluteString, forKey: Keys.url)
         d.set(c.token, forKey: Keys.token)
+        d.set(c.kind.rawValue, forKey: Keys.kind)
+        d.set(c.environmentId, forKey: Keys.environment)
+        d.set(c.name, forKey: Keys.name)
         d.removeObject(forKey: Keys.off)
         Keychain.write(.paired(c))
         reload()
@@ -109,6 +142,9 @@ struct Connection: Equatable {
         let d = UserDefaults.standard
         d.removeObject(forKey: Keys.url)
         d.removeObject(forKey: Keys.token)
+        d.removeObject(forKey: Keys.kind)
+        d.removeObject(forKey: Keys.environment)
+        d.removeObject(forKey: Keys.name)
         d.set(true, forKey: Keys.off)
         Keychain.write(.off)
         reload()
@@ -222,7 +258,12 @@ struct Connection: Equatable {
             guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let data = out as? Data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .nothing }
             if json["off"] as? Bool == true { return .off }
-            if let c = Connection.make(json["url"] as? String, json["token"] as? String) { return .paired(c) }
+            if var c = Connection.make(json["url"] as? String, json["token"] as? String) {
+                c.kind = Kind(rawValue: json["kind"] as? String ?? "") ?? .server
+                c.environmentId = json["environmentId"] as? String
+                c.name = json["name"] as? String
+                return .paired(c)
+            }
             return .nothing
         }
 
@@ -230,7 +271,11 @@ struct Connection: Equatable {
             SecItemDelete(query as CFDictionary)
             let json: [String: Any]
             switch stored {
-            case let .paired(c): json = ["url": c.url.absoluteString, "token": c.token]
+            case let .paired(c):
+                var j: [String: Any] = ["url": c.url.absoluteString, "token": c.token, "kind": c.kind.rawValue]
+                if let e = c.environmentId { j["environmentId"] = e }
+                if let n = c.name { j["name"] = n }
+                json = j
             case .off: json = ["off": true]
             case .nothing: return
             }
