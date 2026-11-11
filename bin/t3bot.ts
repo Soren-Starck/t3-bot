@@ -54,6 +54,7 @@ import {
   APNS_FILE, CONFIG_DIR, DEFAULT_PORT, HOME, PORT, ROOT, TOKEN_FILE, URL_FILE, USER_CONFIG, VERSION,
   chiefId, configPath, normalize, rulesPath, threadDefaults, tilde, untilde, userName,
 } from '../server/config'
+import { newToken } from '../server/guard'
 import { apnsStatus } from '../server/push'
 import { qrTerminal } from '../server/qr'
 import * as t3 from '../server/t3'
@@ -435,7 +436,7 @@ async function setup() {
   say(`Token        ${tokenThere ? `already in ${tilde(TOKEN_FILE)}` : `${dry ? 'would be' : 'is'} created in ${tilde(TOKEN_FILE)} (only you can read it)`}`)
   if (!tokenThere && !dry) {
     mkdirSync(dirname(TOKEN_FILE), { recursive: true, mode: 0o700 })
-    writeFileSync(TOKEN_FILE, Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url') + '\n', { mode: 0o600 })
+    writeFileSync(TOKEN_FILE, newToken() + '\n', { mode: 0o600 })
     chmodSync(TOKEN_FILE, 0o600)
   }
 

@@ -3,6 +3,8 @@
  * the same things with the same words. Pure code, no state: demo-check.ts checks it line by line.
  */
 
+import { chmodSync, mkdirSync, readdirSync, statSync } from 'fs'
+
 /** A request refused because of what it was sent: answered with 400 and these words. */
 export class BadInput extends Error {}
 
@@ -59,12 +61,17 @@ export function inQuiet(from: string, to: string, minuteOfDay: number): boolean 
  * A card's link as the app may open it. The app hands it to the system as it is, so a link that would act inside
  * T3 Bot itself (a pairing link, which shows the connect screen for another server) or that names a local file or
  * a script is dropped: a card is written by an agent, and what an agent read can ask for anything.
+ * Web, mail, phone and other apps' links (T3 Code's threads among them) pass as sent. Of T3 Bot's own links only
+ * the two that show something pass: a bot (t3bot://agent/<id>) and a card (t3bot://card/<id>).
  */
-const NO_LINK = /^(t3bot|javascript|data|file|vbscript|blob)$/
+const NO_LINK = /^(javascript|data|file|vbscript|blob)$/
+const OWN_LINK = /^t3bot:\/\/(agent|card)([/?#][^\\\s]*)?$/i
 export function safeLink(x: string): string {
+  if (/[\u0000-\u001f\u007f]/.test(x)) return ''
   // The system ignores spaces and control characters inside a scheme, so they are taken out before it is read.
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(x.replace(/[\u0000-\u0020\u007f]/g, ''))?.[1].toLowerCase()
-  return /[\u0000-\u001f\u007f]/.test(x) || (scheme && NO_LINK.test(scheme)) ? '' : x
+  if (scheme === 't3bot') return OWN_LINK.test(x) ? x : ''
+  return scheme && NO_LINK.test(scheme) ? '' : x
 }
 
 /** Only image files under the home folder or the temp folders, never secrets. Null for anything else. */
@@ -75,9 +82,49 @@ export function servableImage(path: string, home: string, realpath: (p: string) 
   try { real = realpath(path) } catch { return null }
   // The file itself must be a picture, not only the name asked for: a link named .png can point at anything.
   if (!IMAGE.test(real)) return null
-  const okRoot = [home.replace(/\/+$/, '') + '/', '/private/tmp/', '/tmp/', '/private/var/folders/'].some((r) => real.startsWith(r))
+  // The home folder is compared as the system resolves it too: a home reached through a link is still the home.
+  let realHome = home
+  try { realHome = realpath(home) } catch {}
+  const okRoot = [home, realHome].map((h) => h.replace(/\/+$/, '') + '/').concat('/private/tmp/', '/tmp/', '/private/var/folders/').some((r) => r.length > 1 && real.startsWith(r))
   const banned = ['/.ssh/', '/.config/', '/Library/Keychains/', '/.t3/userdata/secrets/', '/.gnupg/', '/.aws/'].some((b) => real.includes(b))
   return okRoot && !banned ? real : null
+}
+
+/** A new token for the app: 32 random bytes from the system, 43 characters. */
+export const newToken = (): string => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url')
+
+/** What the server keeps in its data folder. A folder that holds only these is the server's own. */
+const OWN_FILES = /^(t3bot\.sqlite(-wal|-shm|-journal)?|uploads|phone\.json(\.tmp)?|releases-state\.json|\.DS_Store)$/
+/**
+ * A folder only this account can open. A new one is made that way. One that is already there and looser is
+ * tightened only when it is the server's own (`own`, or it holds nothing but the server's files): a folder the
+ * person pointed the server at, with other things in it, keeps the access they gave it.
+ */
+export function privateDir(dir: string, own: boolean): 'made' | 'kept' | 'tightened' | 'left' {
+  let there = true
+  try { statSync(dir) } catch { there = false }
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  if (!there) return 'made'
+  try {
+    if (!(statSync(dir).mode & 0o077)) return 'kept'
+    if (!own && !readdirSync(dir).every((n) => OWN_FILES.test(n))) return 'left'
+    chmodSync(dir, 0o700)
+    return 'tightened'
+  } catch { return 'left' }
+}
+
+/**
+ * What an error answer may say about a fault of the server: its code when it has one, else its first line with
+ * every file path and token taken out. The whole error goes to the server log, never to the caller.
+ */
+export function publicReason(e: unknown): string {
+  const code = (e as any)?.code
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{2,40}$/.test(code)) return code
+  return String((e as any)?.message ?? e).split('\n')[0]
+    .replace(/Bearer\s+\S+/gi, 'Bearer (hidden)')
+    .replace(/(?<![\w~.:/])\/(?:[^\s/'"`:,;()]+\/)+[^\s/'"`:,;()]*/g, '(a file)')
+    .replace(/\s+at\s+\S+\s+\(.*$/, '')
+    .slice(0, 160)
 }
 
 export const NOTE_KINDS = ['alarm', 'approve', 'do', 'know', 'draft'] as const

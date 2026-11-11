@@ -315,6 +315,10 @@ final class Store: ObservableObject {
     @Published var directPushProblem: String?
     /// Writes of the hooks under way: the automatic rewrite waits for them instead of starting a second one.
     private var directPushJobs = 0
+    /// The pairing and token the automatic rewrite was last tried for, in this launch.
+    private var directPushAutoTried: String?
+    /// The pairing notifications were turned on in: the automatic rewrite never writes to another T3 Code.
+    private static let directPushPairingKey = "t3bot.direct.push.on.pairing"
 
     /// Turns notifications on or off for a T3 Code pairing. On: this phone's address goes into T3 Code's Claude hooks.
     func setDirectPush(_ on: Bool, quiet: Bool = false) {
@@ -329,11 +333,13 @@ final class Store: ObservableObject {
                 }
                 do {
                     let n = try await DirectPush.turnOn(token: deviceToken)
+                    if let c = Connection.current, c.isDirect { UserDefaults.standard.set(c.environmentId ?? c.url.absoluteString, forKey: Self.directPushPairingKey) }
                     directPushOn = true
                     directPushProblem = nil
                     if !quiet { flash(n == 1 ? "Notifications on" : "Notifications on for \(n) Claude setups") }
                 } catch {
-                    directPushOn = false
+                    // A failed automatic rewrite leaves the switch where the person put it.
+                    directPushOn = quiet ? DirectPush.isOn : false
                     directPushProblem = error.localizedDescription
                     if !quiet { flash(error.localizedDescription, failed: true) }
                 }
@@ -352,7 +358,21 @@ final class Store: ObservableObject {
             let asked = "t3bot.direct.push.asked.\(c.environmentId ?? c.url.absoluteString)"
             if DirectPush.isOn {
                 // A new push token, or hooks whose last write did not finish: written again; Settings says so if it fails.
-                if DirectPush.stale(token: deviceToken), directPushJobs == 0 { setDirectPush(true, quiet: true) }
+                // Once per launch for a token: a write that keeps failing is not tried again at every refresh. Only for
+                // the pairing it was turned on in, and only while iOS still allows T3 Bot's notifications.
+                let pairing = c.environmentId ?? c.url.absoluteString
+                let owner = UserDefaults.standard.string(forKey: Self.directPushPairingKey)
+                let attempt = pairing + " " + deviceToken
+                if DirectPush.stale(token: deviceToken), directPushJobs == 0, directPushAutoTried != attempt, owner == nil || owner == pairing {
+                    directPushAutoTried = attempt
+                    Task {
+                        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+                        guard status == .authorized || status == .provisional || status == .ephemeral else { return }
+                        guard DirectPush.isOn, directPushJobs == 0, let now = Connection.current, now.isDirect,
+                              (now.environmentId ?? now.url.absoluteString) == pairing else { return }
+                        setDirectPush(true, quiet: true)
+                    }
+                }
             } else if !UserDefaults.standard.bool(forKey: asked) {
                 UserDefaults.standard.set(true, forKey: asked)
                 setDirectPush(true)
@@ -1000,7 +1020,10 @@ final class Store: ObservableObject {
             self.outgoing[agentId] = nil
             self.outgoingImages[agentId] = nil
             self.lastSent[agentId] = nil
-            self.failed[agentId, default: []].append(FailedSend(text: text, images: images, clientId: id, imageIds: photoIds))
+            // One entry per message id, and at most 20 a chat (each may hold photos): the oldest goes first.
+            var kept = (self.failed[agentId] ?? []).filter { $0.clientId != id }
+            kept.append(FailedSend(text: text, images: images, clientId: id, imageIds: photoIds))
+            self.failed[agentId] = Array(kept.suffix(20))
             onFail()
         }) {
             var body: [String: Any] = ["text": text, "clientId": id]

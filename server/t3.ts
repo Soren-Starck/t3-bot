@@ -7,6 +7,7 @@
  * T3 Code's folder is ~/.t3 unless $T3BOT_T3_HOME or $T3CODE_HOME says otherwise. With T3BOT_READONLY=1 nothing
  * is ever sent to T3 Code: every write answers with an error instead (for tests against a real install).
  */
+import { publicReason } from './guard'
 import { Database } from 'bun:sqlite'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
@@ -60,7 +61,7 @@ export function q<T = any>(sql: string, ...params: any[]): T[] {
       try { db?.close() } catch {}
       db = null
       if (WILL_NOT_HEAL.test(lastError)) return []
-      throw new ReadError(`T3 Code's data could not be read just now (${lastError}). Try again in a moment.`)
+      throw new ReadError(`T3 Code's data could not be read just now (${publicReason(lastError)}). Try again in a moment.`)
     }
   }
 }

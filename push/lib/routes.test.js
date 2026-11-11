@@ -9,7 +9,7 @@ process.env.APNS_KEY = pair.privateKey.export({ type: 'pkcs8', format: 'pem' })
 process.env.APNS_KEY_ID = 'ABCDE12345'
 process.env.APNS_TEAM_ID = 'TEAM123456'
 delete process.env.ADDRESS_MAX_AGE_DAYS
-const { apns, seal, unseal } = await import('./apns.js')
+const { apns, seal, unseal, markGone, isGone, GONE_MS } = await import('./apns.js')
 const address = (await import('../api/address.js')).default
 const ring = (await import('../api/ring.js')).default
 const health = (await import('../api/health.js')).default
@@ -184,6 +184,46 @@ test('ring: a token Apple refused is not sent to Apple again for a few minutes',
   expect((await call(ring, { to: addressFor(fine), kind: 'request' })).status).toBe(502)
   answer = () => ({ status: 200, reason: '' })
   expect((await call(ring, { to: addressFor(fine), kind: 'request' })).status).toBe(200)
+})
+
+test('ring: a token only one Apple environment refused is not remembered', async () => {
+  // A TestFlight build that says sandbox, on a day production does not answer: nothing is known about the phone.
+  for (const other of [{ status: 0, reason: 'timeout' }, { status: 503, reason: 'ServiceUnavailable' }, { status: 429, reason: 'TooManyRequests' }, { status: 403, reason: 'InvalidProviderToken' }]) {
+    const token = hex()
+    answer = (p) => (p.env === 'sandbox' ? { status: 400, reason: 'BadDeviceToken' } : other)
+    await call(ring, { to: addressFor(token, 'sandbox'), kind: 'request' })
+    expect(sent.map((p) => p.env).slice(-2)).toEqual(['sandbox', 'production'])
+    // Production answers again: the very next ring reaches the phone.
+    const before = sent.length
+    answer = (p) => (p.env === 'sandbox' ? { status: 400, reason: 'BadDeviceToken' } : { status: 200, reason: '' })
+    expect((await call(ring, { to: addressFor(token, 'sandbox'), kind: 'request' })).body).toEqual({ ok: true })
+    expect(sent.length).toBe(before + 2)
+  }
+  // The reverse: the address says production, the token is a sandbox one.
+  const token = hex()
+  answer = (p) => (p.env === 'production' ? { status: 400, reason: 'BadDeviceToken' } : { status: 0, reason: 'timeout' })
+  await call(ring, { to: addressFor(token, 'production'), kind: 'request' })
+  answer = (p) => (p.env === 'production' ? { status: 400, reason: 'BadDeviceToken' } : { status: 200, reason: '' })
+  expect((await call(ring, { to: addressFor(token, 'production'), kind: 'request' })).body).toEqual({ ok: true })
+})
+
+test('ring: a token refused for one app is still tried for another, and the memory has a ceiling', async () => {
+  const token = hex()
+  answer = (p) => (p.topic === 'com.example.other' ? { status: 400, reason: 'DeviceTokenNotForTopic' } : { status: 200, reason: '' })
+  expect((await call(ring, { to: addressFor(token, 'sandbox', 'com.example.other'), kind: 'request' })).status).toBe(410)
+  expect((await call(ring, { to: addressFor(token, 'sandbox', 'com.example.other'), kind: 'request' })).status).toBe(410)
+  expect(sent.length).toBe(1)
+  expect((await call(ring, { to: addressFor(token, 'sandbox', 'com.example.t3bot'), kind: 'request' })).body).toEqual({ ok: true })
+  // The memory forgets after five minutes and never holds more than 5000 phones.
+  const t0 = 1_000_000
+  markGone('k', t0)
+  expect(isGone('k', t0 + GONE_MS - 1)).toBe(true)
+  expect(isGone('k', t0 + GONE_MS)).toBe(false)
+  for (let i = 0; i < 12000; i++) markGone(`fill-${i}`, t0)
+  let held = 0
+  for (let i = 0; i < 12000; i++) if (isGone(`fill-${i}`, t0 + 1)) held++
+  expect(held).toBeLessThanOrEqual(5000)
+  expect(isGone('fill-11999', t0 + 1)).toBe(true)
 })
 
 test('ring: Apple refusing the sender, or not answering, is a 502 that says which', async () => {

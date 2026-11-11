@@ -265,6 +265,11 @@ actor DirectBackend {
             return s
         } catch {
             backoff.failed()
+            // A socket T3 Code refused at the upgrade only says "dropped". When what answers speaks another protocol
+            // than this T3 Bot, say that, and which side to update. Not asked when nothing answers at all.
+            let away: [URLError.Code] = [.notConnectedToInternet, .dataNotAllowed, .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .timedOut, .cancelled]
+            if !(error is CancellationError), !((error as? URLError).map { away.contains($0.code) } ?? false),
+               let why = await T3Link.protocolProblem(config.base, session: session) { throw T3Error.rpc(why) }
             throw error
         }
     }
@@ -759,6 +764,8 @@ actor DirectBackend {
     func hello() async throws -> Hello {
         let d = try await T3Link.descriptor(config.base, session: session)
         descriptor = d
+        // A T3 Code updated or replaced since pairing: the same sentence as at pairing, not a raw answer later.
+        do { try T3Link.check(d) } catch { throw T3Error.rpc((error as? T3PairingError)?.errorDescription ?? error.localizedDescription) }
         try await ensureShell()
         return Hello(ok: true, name: d.label ?? config.label, version: d.serverVersion, user: local().userName, demo: false, push: nil,
                      bots: Compose.bots(input()).count, t3: T3State(ok: true, error: nil))

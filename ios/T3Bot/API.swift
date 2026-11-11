@@ -160,7 +160,7 @@ enum API {
         if case let APIError.status(code, _) = error {
             return code == 401 || code == 403 ? "\(host) refused this phone's token (answer \(code))" : "\(host) answered with an error (\(code))"
         }
-        if case let APIError.message(m) = error { return String(m.prefix(160)) }
+        if case let APIError.message(m) = error { return String(m.prefix(280)) }
         if error is DecodingError { return "\(host) answered with something this app version cannot read" }
         guard let u = error as? URLError else { return "\(host) did not answer: \(String(error.localizedDescription.prefix(120)))" }
         switch u.code {

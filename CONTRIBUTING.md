@@ -5,6 +5,7 @@ Thanks for looking. T3 Bot is a small project kept by one person, so a short not
 ## Before you open a pull request
 
 - **Bugs:** open an issue with what you did, what you expected and what happened. Say how the app is paired (straight with T3 Code, or with the T3 Bot server), and add your T3 Code version and your iOS version. With the server, add the output of `t3bot doctor`. Remove tokens, pairing codes and addresses first.
+- **Security problems:** do not open an issue. [SECURITY.md](SECURITY.md) says how to report one privately.
 - **Small fixes:** send the pull request directly.
 - **Features:** open an issue first and describe the problem you have. Not every feature fits. The app is meant to stay small.
 

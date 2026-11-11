@@ -16,6 +16,7 @@
 
 ## Before you start
 
+- **T3 Code 0.1.0 or later.** Older ones are refused at pairing. The newest checked are stable 0.1.8 and the main branch of 11 Nov 2026.
 - **You build it yourself.** There is no TestFlight or App Store build. You need a Mac with Xcode 27, an iPhone on iOS 26 and a paid Apple Developer account.
 - **Notifications are off in a fresh build.** Apple only lets an app's signing team send it pushes, so the phone rings only after you deploy your own push sender ([push/README.md](push/README.md)). Until then the app works and stays silent.
 - **Only Claude threads ring.** Codex threads show in the app and send no notification yet.
@@ -72,6 +73,6 @@ The app trades the link's one-time code for a token, reads your threads over T3 
 
 ## Docs
 
-[Setup](docs/SETUP.md) · [Setup for agents](docs/AGENT-SETUP.md) · [Cards](docs/CARDS.md) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md)
+[Setup](docs/SETUP.md) · [Setup for agents](docs/AGENT-SETUP.md) · [Cards](docs/CARDS.md) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
 
 MIT. Faces: [BoopFace](ios/T3Bot/BoopFace/LICENSE) by CX ArtLab, MIT. Not affiliated with T3 Code, Ping or xAI.

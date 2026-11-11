@@ -16,7 +16,7 @@ import { dirname, join } from 'path'
 import * as t3 from './t3'
 import { push, pushLive, type Alert, type Device, type Env } from './push'
 import { clip, oneLineCommand, plain, preview, quickReplies, snippet } from './text'
-import { BadInput, inQuiet, minutesSince, overLimit, readBody, servableImage as servable, storedNote, tidyNote, tooLarge, wrongMethod } from './guard'
+import { BadInput, inQuiet, minutesSince, newToken, overLimit, privateDir, publicReason, readBody, safeLink, servableImage as servable, storedNote, tidyNote, tooLarge, wrongMethod } from './guard'
 import {
   DATA_DIR as DATA, HOME, PORT, ROOT, TOKEN_FILE, VERSION, apnsConfigured, botNotesPath, chiefId, configPath, expandArgv, isHHMM,
   keepDays, loadConfig, rulesPath, saveConfig, threadDefaults, tilde, userInPrompt, userName, type AgentConf, type Config, type SourceConf,
@@ -48,7 +48,7 @@ function loadToken(): string {
     }
   }
   if (!t) {
-    t = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url')
+    t = newToken()
     try {
       mkdirSync(dirname(TOKEN_FILE), { recursive: true, mode: 0o700 })
       writeFileSync(TOKEN_FILE, t + '\n', { mode: 0o600 })
@@ -176,7 +176,8 @@ function describeSchedule(s: any): string {
 /** The server's own SQLite file. A folder it cannot write to stops the start with what to do, not a stack trace. */
 function openState(): Database {
   try {
-    mkdirSync(DATA, { recursive: true })
+    // Only this account opens the data folder. A folder set with T3BOT_DATA_DIR that holds other things keeps its access.
+    privateDir(DATA, !process.env.T3BOT_DATA_DIR)
     const d = new Database(join(DATA, 't3bot.sqlite'))
     d.exec('pragma busy_timeout = 5000')
     return d
@@ -292,6 +293,8 @@ function tidyCard(c: any): any {
     const t = text(o[k])
     if (t === undefined) delete o[k]; else o[k] = t
   }
+  // A source's card follows the rule of an agent's card: a link that would act in the app, or a file or a script, is left out.
+  if (typeof o.link === 'string' && !safeLink(o.link)) delete o.link
   if (o.minutes != null && typeof o.minutes !== 'number') { const n = Number(o.minutes); if (Number.isFinite(n)) o.minutes = n; else delete o.minutes }
   if (o.customer != null && typeof o.customer !== 'boolean') o.customer = o.customer === 1 || o.customer === 'true'
   if (typeof o.rank === 'number' && Number.isFinite(o.rank)) o.rank = Math.round(o.rank); else delete o.rank
@@ -709,7 +712,7 @@ const UPLOADS = join(DATA, 'uploads')
 const MAX_IMAGE = 12 * 1024 * 1024
 const MAX_TEXT = 100_000
 function saveImages(images: unknown[]): string[] {
-  mkdirSync(UPLOADS, { recursive: true })
+  privateDir(UPLOADS, true)
   const out: string[] = []
   for (const b64 of images.slice(0, 6)) {
     if (typeof b64 !== 'string' || !b64) continue
@@ -1470,7 +1473,7 @@ async function route(req: Request, url: URL, path: string, body: any): Promise<R
     if (e instanceof Bad || e instanceof BadInput) return json({ ok: false, error: e.message }, 400)
     log('request error', { path, e: String((e as any)?.stack ?? e).slice(0, 400) })
     // A read of T3 Code that failed says so in plain words; anything else is a fault of this server.
-    return json({ ok: false, error: e instanceof t3.ReadError ? e.message : `T3 Bot hit an error (${reason(e)}). The server log has the details.` }, 500)
+    return json({ ok: false, error: e instanceof t3.ReadError ? e.message : `T3 Bot hit an error (${publicReason(e)}). The server log has the details.` }, 500)
   }
 }
 

@@ -70,16 +70,19 @@ Stay on the server if you use `t3bot notify`, sources, handlers, drafts or the m
 ## Fixes
 
 - **Offline.** The app no longer stays on Offline after you come back to it. It tries again when you return, when the network changes and after short waits. Settings > Connection > Details shows the last answer and the last problem.
-- **Accessibility.** VoiceOver reads rows, cards and status. Small buttons have full-size hit areas. With Reduce Motion on, the face no longer flies between the top bar and the chat, and a reviewed card leaves without flying off.
+- **Accessibility.** VoiceOver reads rows, cards and status. Small buttons have full-size hit areas. With Reduce Motion on, the face no longer flies between the top bar and the chat, a reviewed card leaves without flying off, and every face holds still: one expression, no blinking, no looping animation. The full-screen image answers VoiceOver's zoom gesture and has Zoom in and Zoom out actions.
 - **Photos and crashes.** Photos are scaled down before upload, so the share extension no longer risks being stopped for memory. Several crash paths are gone, among them a calendar event with no dates.
-- **Pairing with T3 Code.** A field the app does not know, as a newer T3 Code may send, no longer drops a thread. A connection that goes quiet is closed and opened again.
-- **Sending.** A retry reuses the message's id, so a bad connection no longer posts it twice. A new message keeps an earlier "Not sent" one on screen. A slash command no longer stays as sending. These were the known issues of 0.2.0.
-- **Server.** Bad input gets a clear 400 or 413 and no longer reaches the phone. The push key's token no longer shows in the process list. `t3bot` exits 2 on a usage error and 1 when the server is down or refuses. A daily brief set after 21:00 keeps its full window past midnight.
-- **Push sender.** Published for the first time, with every request checked and limits per caller and per phone.
+- **Pairing with T3 Code.** A field the app does not know, as a newer T3 Code may send, no longer drops a thread. A connection that goes quiet is closed and opened again. A T3 Code older than 0.1.0 is refused at pairing, before the code is spent, with a sentence that names its version and the one needed. When T3 Code refuses the app over its protocol later on, the app says which side to update.
+- **Sending.** A retry reuses the message's id, so a bad connection no longer posts it twice. Every message that did not leave stays in its chat, each with its own retry, so two failed sends no longer replace one another. A slash command no longer stays as sending. These were the known issues of 0.2.0.
+- **Notifications without the server.** When the phone's push token changes, or the last write of the hooks did not finish, the app writes its hooks again at the next launch or refresh and takes this phone's earlier addresses out. If that fails, Settings shows why under "Ring this phone".
+- **Server.** Bad input gets a clear 400 or 413 and no longer reaches the phone. A card's link that is a pairing link, a script or a local file is dropped. The push key's token no longer shows in the process list. `t3bot` exits 2 on a usage error and 1 when the server is down or refuses. A daily brief set after 21:00 keeps its full window past midnight.
+- **Push sender.** Published for the first time, with every request checked and limits per caller and per phone. A token that both of Apple's environments refused is not sent to Apple again for five minutes.
+
+Some of these fixes landed after the first 0.3.0 build. Pull and build again to get them all.
 
 ## What you need
 
-- T3 Code on your computer, with at least one project.
+- T3 Code 0.1.0 or later on your computer, with at least one project.
 - A Mac with Xcode 27 and XcodeGen.
 - An iPhone on iOS 26.
 - A paid Apple Developer account, for the app's notification entitlements.
@@ -93,8 +96,8 @@ The four at the top of these notes, and:
 - A Claude thread that was already running when notifications were turned on rings from its next session. A Claude provider with its own `--settings` launch argument, or with environment values, is left alone and does not ring.
 - A pairing with T3 Code lasts 30 days, then the app asks you to pair again.
 - Paired straight with T3 Code, quiet hours make pushes silent but do not hold them. The morning brief and sharing the calendar and contacts need the server, and Settings says so.
-- T3 Bot uses the API of T3 Code's own clients, not a documented public one. A T3 Code update can break it until T3 Bot follows. The app refuses a T3 Code whose protocol it does not know and says so.
+- T3 Bot uses the API of T3 Code's own clients, not a documented public one. A T3 Code update can break it until T3 Bot follows. It works with T3 Code 0.1.0 and later (protocol 2). That range was checked against stable 0.1.8 and the main branch of 11 Nov 2026 by reading T3 Code's contracts, not by running each version. The app refuses an older or a newer protocol and says which side to update.
 
-Bugs and ideas go in [issues](https://github.com/Soren-Starck/t3-bot/issues).
+Bugs and ideas go in [issues](https://github.com/Soren-Starck/t3-bot/issues). A security problem is reported privately: see [SECURITY.md](https://github.com/Soren-Starck/t3-bot/blob/main/SECURITY.md).
 
 T3 Bot is not affiliated with, endorsed by or supported by T3 Code or Ping. MIT license. The faces are [BoopFace](https://github.com/Soren-Starck/t3-bot/blob/v0.3.0/ios/T3Bot/BoopFace/LICENSE) by CX ArtLab, MIT.

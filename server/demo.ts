@@ -22,7 +22,7 @@ import { answerScript, cardScript, decisionScript, scriptFor, type Script } from
 import { generated } from './demo-png'
 import { VERSION } from './config'
 import { preview, quickReplies, snippet } from './text'
-import { BadInput, overLimit, readBody, tidyNote, tooLarge, wrongMethod } from './guard'
+import { BadInput, overLimit, publicReason, readBody, tidyNote, tooLarge, wrongMethod } from './guard'
 import { CHIEF, DEFAULT_ACTIONS, USER, seed, type Action, type Bot, type Card, type Entry, type EntryImage, type Run, type Settings, type World } from './demo-world'
 
 const ROOT = join(import.meta.dir, '..')
@@ -680,7 +680,7 @@ async function route(req: Request): Promise<Response> {
   } catch (e) {
     if (e instanceof BadRequest || e instanceof BadInput) return json({ ok: false, error: e.message }, 400)
     log('request error', { path, e: String(e) })
-    return json({ ok: false, error: String(e instanceof Error ? e.message : e) }, 500)
+    return json({ ok: false, error: `T3 Bot hit an error (${publicReason(e)}). The server log has the details.` }, 500)
   }
 }
 

@@ -41,13 +41,14 @@ enum DirectPush {
     }
 
     enum Failure: LocalizedError {
-        case noSender, refused(String), otherSettings([String]), noClaude, scope
+        case noSender, refused(String), otherSettings([String]), secrets([String]), noClaude, scope
 
         var errorDescription: String? {
             switch self {
             case .noSender: return "This build of T3 Bot has no push sender set."
             case let .refused(why): return "The push sender said no: \(why)"
             case let .otherSettings(names): return "\(names.joined(separator: ", ")) already has its own --settings in T3 Code's launch arguments, so T3 Bot cannot add its hooks there."
+            case let .secrets(names): return "\(names.joined(separator: ", ")) keeps a secret in its T3 Code settings, and T3 Bot does not rewrite a provider that has one. Its hooks were left as they are."
             case .noClaude: return "T3 Code runs no Claude provider here. Notifications come from Claude threads."
             case .scope: return "This pairing may not change T3 Code's provider settings. Pair again with a link that has the standard access."
             }
@@ -87,6 +88,22 @@ enum DirectPush {
         }
     }
 
+    /// True when a provider instance carries a secret anywhere but its launch arguments: a key named for one
+    /// (secret, token, password, api key) with a value, at any depth.
+    static func holdsSecret(_ value: Any, key: String = "") -> Bool {
+        let k = key.lowercased()
+        if ["secret", "password", "apikey", "api_key"].contains(where: { k.contains($0) }) {
+            if value is NSNull || value is Bool { return false }
+            if let t = value as? String { return !t.isEmpty }
+            if let d = value as? [String: Any] { return !d.isEmpty }
+            if let a = value as? [Any] { return !a.isEmpty }
+            return true
+        }
+        if let d = value as? [String: Any] { return d.contains { name, v in name != "launchArgs" && holdsSecret(v, key: name) } }
+        if let a = value as? [Any] { return a.contains { holdsSecret($0) } }
+        return false
+    }
+
     /// Puts this phone's address in the hooks of every Claude provider (or takes it out with `remove`), with the
     /// bots of now. Returns how many providers ring this phone.
     @discardableResult
@@ -97,18 +114,21 @@ enum DirectPush {
         let earlier = [installed, saved?.address].compactMap { $0 }
         let mine: String? = remove ? saved?.address : try await address(token: token ?? saved?.token ?? "")
         let home: Home = try await API.get("v1/home")
-        let bots = home.agents.map(\.threadId)
+        // Sorted, so the order the bots come in never makes a write by itself.
+        let bots = home.agents.map(\.threadId).sorted()
         let instances = try await claudeInstances(b)
         guard !instances.isEmpty else { throw Failure.noClaude }
         var ringing = 0
         var blocked: [String] = []
+        var secret: [String] = []
         for (id, entry) in instances {
             var config = (entry["config"] as? [String: Any]) ?? [:]
             let args = (config["launchArgs"] as? String) ?? ""
             var addresses = HookSettings.addresses(in: args)
+            // This phone's address keeps its place: moving it to the end made two phones paired with the same
+            // T3 Code rewrite each other's order for ever.
             if let mine {
-                addresses.removeAll { $0 == mine }
-                if !remove { addresses.append(mine) }
+                if remove { addresses.removeAll { $0 == mine } } else if !addresses.contains(mine) { addresses.append(mine) }
             }
             addresses.removeAll { $0 != mine && earlier.contains($0) }
             let next: String
@@ -119,6 +139,13 @@ enum DirectPush {
             }
             if !remove { ringing += 1 }
             guard next != args else { continue }
+            // The whole instance goes back with the write. One that holds a secret (a reference on a newer T3 Code,
+            // a hidden value on an older one) is left alone: what was read may not be what T3 Code keeps.
+            if holdsSecret(entry) {
+                if !remove { ringing -= 1 }
+                secret.append(id)
+                continue
+            }
             config["launchArgs"] = next
             var instance = entry
             instance["config"] = config
@@ -131,6 +158,7 @@ enum DirectPush {
             }
         }
         if ringing == 0, !blocked.isEmpty, !remove { throw Failure.otherSettings(blocked) }
+        if ringing == 0, !secret.isEmpty, !remove { throw Failure.secrets(secret) }
         if remove { save(nil); installed = nil } else { installed = mine }
         return ringing
     }

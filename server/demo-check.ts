@@ -8,11 +8,11 @@
  * The write checks only run against a server that says `"demo": true` in /v1/hello. Such a server is reset
  * before the first check and after the last one, unless --read-only is given. Exit code 0 when everything passed, 1 otherwise.
  */
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
 import { networkInterfaces, tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { asks, oneLine, preview, quickReplies, snippet } from './text'
-import { BadInput, bodyLimit, inQuiet, kindOf, minutesSince, overLimit, readBody, safeLink, servableImage, storedNote, tidyNote, wrongMethod } from './guard'
+import { BadInput, bodyLimit, inQuiet, kindOf, minutesSince, newToken, overLimit, privateDir, publicReason, readBody, safeLink, servableImage, storedNote, tidyNote, wrongMethod } from './guard'
 import { CURL_ARGS, curlConfig, post as apnsPost, token as apnsToken } from './push'
 
 const args = process.argv.slice(2)
@@ -464,6 +464,29 @@ async function writes() {
   ok(h.needs.filter((c: any) => c.id === 'note:web:check-do').length === 1 && h.needs.find((c: any) => c.id === 'note:web:check-do').title === 'Check do, again', 'a note with the same key replaces the old one')
   let know = (await get('/v1/know')).body
   ok(know.notes[0].id === 'web:check-know', 'the know note leads the digest')
+  // A link the app must not open is left out, and the card is still made with everything else.
+  for (const [i, bad] of ['t3bot://connect?url=http://x&token=y', 'javascript:alert(1)', 'file:///etc/passwd'].entries()) {
+    r = await post('/v1/notify', { kind: 'do', title: `Linked ${i}`, body: 'Kept', agent: 'web', key: `check-link-${i}`, link: bad })
+    const card = (await home()).needs.find((c: any) => c.id === `note:web:check-link-${i}`)
+    ok(r.status === 200 && r.body.ok === true && card && card.title === `Linked ${i}` && !card.link && !JSON.stringify(card).includes(bad), `POST /v1/notify with the link ${bad} makes the card without the link`)
+  }
+  for (const [i, good] of ['https://example.com/pr/12?a=b', 't3-thread://v1/0b6e3f4a', 't3code://threads/env/abc', 'moorline://loop/abc', 'mailto:a@example.com', 'tel:+33612345678', 't3bot://agent/web'].entries()) {
+    r = await post('/v1/notify', { kind: 'do', title: `Good link ${i}`, agent: 'web', key: `check-good-${i}`, link: good })
+    const card = (await home()).needs.find((c: any) => c.id === `note:web:check-good-${i}`)
+    ok(r.body.ok === true && card?.link === good, `POST /v1/notify keeps the link ${good} on the card`)
+  }
+  // No refusal repeats what it was sent as a token, names a file of this computer, or shows a stack.
+  {
+    const marker = 'Bearer zz-marker-91-not-a-token'
+    const asked = [
+      await get('/v1/home', { authorization: marker }), await post('/v1/notify', { kind: 'do', title: 'x' }, { authorization: marker }),
+      await get('/v1/file?path=/etc/hosts', { authorization: marker }), await get('/v1/nothing-here'), await get('/v1/file?path=/etc/hosts'),
+      await get(`/v1/file?path=${encodeURIComponent('/Users/nobody/.ssh/id_ed25519.png')}`), await post('/v1/notify', { kind: 'nope', title: 'x' }),
+      await post('/v1/home', {}), await post('/v1/cards/snooze', {}), await get('/v1/agents/nobody-here'), await post('/v1/answer', { threadId: 'x' }),
+    ]
+    const leaks = asked.filter((x) => x.status >= 400).map((x) => JSON.stringify(x.body ?? '')).filter((t) => /zz-marker|Bearer |\/Users\/|\/etc\/|\/private\/|\.ssh|\n\s+at |\.ts:\d+/.test(t) || (auth.authorization && t.includes(auth.authorization.replace(/^Bearer /, ''))))
+    ok(asked.every((x) => x.status >= 400) && leaks.length === 0, `no 4xx answer repeats the Authorization header, a file path or a stack (${leaks.join(' | ').slice(0, 200)})`)
+  }
   ok((await post('/v1/notify', { kind: 'nope', title: 'x' })).status === 400, 'an unknown kind is 400')
   ok((await post('/v1/notify', { kind: 'do' })).status === 400, 'a note without title is 400')
   r = await post('/v1/notify', { kind: 'do', title: 'For the Chief' })
@@ -858,12 +881,57 @@ function rules() {
   for (const bad of ['null', '[]', '"x"', '3', 'true', '{', 'x']) ok(readBody(bad).error && !readBody(bad).body, `the body ${bad} is refused`)
   const thrown = (fn: () => unknown) => { try { fn(); return null } catch (e) { return e } }
   // A card's link: what would act inside the app, or name a file or a script, is dropped; the rest is kept as sent.
-  for (const bad of ['t3bot://connect?url=http://x&token=y', 'T3Bot://connect', ' t3bot://connect', 't3\tbot://connect', 'javascript:alert(1)', 'JAVASCRIPT:x', 'java\nscript:x', 'data:text/html,x', 'file:///etc/passwd', 'https://x/\u0000']) {
+  for (const bad of ['t3bot://connect?url=http://x&token=y', 'T3Bot://connect', ' t3bot://connect', 't3\tbot://connect', 't3bot:connect?url=x', 't3bot:/connect', 't3bot://debug/send/chief/hi', 't3bot://debug/act/x', 't3bot://agent@connect?url=x', 't3bot://agent:1@connect', 't3bot://agent\\@connect/', 't3bot://agents/x', 't3bot://', 't3bot://card.connect/', 'File:///etc/passwd', 'file:/etc/passwd', 'blob:x', 'vbscript:x', 'javascript:alert(1)', 'JAVASCRIPT:x', 'java\nscript:x', 'data:text/html,x', 'file:///etc/passwd', 'https://x/\u0000']) {
     ok(safeLink(bad) === '' && tidyNote({ title: 'x', link: bad }).link === undefined, `a card link ${JSON.stringify(bad)} is dropped`)
     ok(storedNote({ id: 'n', kind: 'do', title: 'x', link: bad })!.link === undefined, `a stored card link ${JSON.stringify(bad)} is dropped`)
   }
-  for (const good of ['https://example.com/a?b=c#d', 'http://127.0.0.1:3000', 'mailto:a@example.com', 't3://thread/1', 'example.com/page', 'x-t3bot-other://y']) {
+  // Every kind of link the automations on a real install pass (web pages, T3 Code threads, other apps), mail and phone
+  // links, and the app's own two links that only show something.
+  for (const good of ['https://example.com/a?b=c#d', 'http://127.0.0.1:3000', 'https://github.com/o/r/pull/12', 'https://mini.example.ts.net:4610/x?y=1&ref=a.b', 'mailto:a@example.com', 'mailto:a@example.com?subject=Hi%20there',
+    'tel:+33612345678', 'sms:+33612345678', 'facetime:a@example.com', 't3://thread/1', 't3code://threads/env-1/0b6e3f4a-1c2d-4e5f-8a9b-0c1d2e3f4a5b', 't3-thread://v1/0b6e3f4a-1c2d-4e5f-8a9b-0c1d2e3f4a5b', 't3-thread://v1/mcp-123',
+    'moorline://loop/cmse3e9j25sni1avgzfuy', 'shortcuts://run-shortcut?name=Go', 'x-apple-reminderkit://REMCDReminder/1', 'maps://?q=Lyon', 't3bot://agent/web', 't3bot://agent/launch-crew', 't3bot://card/note:web:check-do', 'T3BOT://card/x?y=1', 't3bot://agent',
+    'example.com/page', 'x-t3bot-other://y', 't3botx://connect']) {
     ok(safeLink(good) === good && tidyNote({ title: 'x', link: good }).link === good, `a card link ${good} is kept`)
+    ok(storedNote({ id: 'n', kind: 'do', title: 'x', link: good })!.link === good, `a stored card link ${good} is kept`)
+  }
+  // A dropped link takes nothing else with it: the card is stored with everything else it was sent.
+  for (const bad of ['t3bot://connect?url=http://x&token=y', 'javascript:alert(1)', 'file:///etc/passwd', 't3bot://debug/send/x']) {
+    const n = tidyNote({ kind: 'approve', title: 'Ship it', body: 'Why', agent: 'web', key: 'k', link: bad, fields: [{ label: 'A', value: 'B' }], actions: [{ id: 'go', label: 'Go' }] })
+    ok(n.link === undefined && n.kind === 'approve' && n.title === 'Ship it' && n.body === 'Why' && n.agent === 'web' && n.key === 'k' && n.fields?.[0].value === 'B' && n.actions?.[0].id === 'go', `a card with the link ${bad} keeps everything but the link`)
+    const st = storedNote({ id: 'n', kind: 'do', agent: 'web', title: 'Ship it', body: 'Why', key: 'k', link: bad })!
+    ok(st && st.link === undefined && st.title === 'Ship it' && st.body === 'Why' && st.key === 'k', `a stored card with the link ${bad} keeps everything but the link`)
+  }
+  // A token the server makes: 32 random bytes, never the same twice.
+  {
+    const made = new Set(Array.from({ length: 500 }, () => newToken()))
+    ok(made.size === 500 && [...made].every((t) => /^[A-Za-z0-9_-]{43}$/.test(t)), 'a token the server makes is 43 characters of base64url, each one new')
+    ok(new Set([...made].join('')).size >= 60, 'made tokens use the whole alphabet')
+  }
+  // What a 500 says: a code or one line, without a file path, a token or a stack.
+  {
+    const e1 = Object.assign(new Error("ENOENT: no such file or directory, open '/Users/dana/.ssh/id_ed25519'"), { code: 'ENOENT' })
+    ok(publicReason(e1) === 'ENOENT', 'an error with a code is answered with the code')
+    const said = [new Error("cannot open '/Users/dana/Documents/tax/2026.pdf' for reading"), new Error('bad header Authorization: Bearer abc.DEF-123_secret'), new Error('boom\n    at handler (/Users/dana/t3bot/server/t3bot.ts:10:5)'),
+      'failed /etc/passwd', new Error('x at fn (/opt/app/a.ts:1:2)'), new Error('unable to open database file /private/var/db/x.sqlite: ' + 'y'.repeat(400))].map(publicReason)
+    ok(said.every((x) => !/\/Users\/|\/etc\/|\/opt\/|\/private\/|secret|abc\.DEF|\.ts:\d/.test(x) && x.length <= 160 && !x.includes('\n')), `an error answer names no file, token or stack (${said.map((x) => x.slice(0, 40)).join(' | ')})`)
+    ok(publicReason(new Error('database is locked')) === 'database is locked' && publicReason(new Error('see ~/.t3/userdata and http://127.0.0.1:8809/v1/home')).includes('http://127.0.0.1:8809/v1/home'), 'plain words and web addresses pass')
+  }
+  // The data folder: made for this account only; a looser one is tightened only when it is the server's own.
+  {
+    const dir = mkdtempSync(join(tmpdir(), 't3bot-dir-'))
+    const mode = (p: string) => statSync(p).mode & 0o777
+    try {
+      ok(privateDir(join(dir, 'new', 'deep'), false) === 'made' && mode(join(dir, 'new', 'deep')) === 0o700, 'a new data folder is made 0700')
+      ok(privateDir(join(dir, 'new', 'deep'), false) === 'kept' && mode(join(dir, 'new', 'deep')) === 0o700, 'a folder that is already private is kept')
+      const own = join(dir, 'own'); mkdirSync(own, { mode: 0o755 }); chmodSync(own, 0o755); writeFileSync(join(own, 'anything.txt'), 'x')
+      ok(privateDir(own, true) === 'tightened' && mode(own) === 0o700, "the server's default folder, found looser, is tightened to 0700")
+      const mine = join(dir, 'mine'); mkdirSync(mine); chmodSync(mine, 0o755); writeFileSync(join(mine, 't3bot.sqlite'), ''); writeFileSync(join(mine, 't3bot.sqlite-wal'), ''); mkdirSync(join(mine, 'uploads'))
+      ok(privateDir(mine, false) === 'tightened' && mode(mine) === 0o700, "a chosen folder that holds only the server's files is tightened")
+      const shared = join(dir, 'shared'); mkdirSync(shared); chmodSync(shared, 0o755); writeFileSync(join(shared, 't3bot.sqlite'), ''); writeFileSync(join(shared, 'family-photos.txt'), 'x')
+      ok(privateDir(shared, false) === 'left' && mode(shared) === 0o755, 'a chosen folder that holds other things keeps its access')
+      const empty = join(dir, 'empty'); mkdirSync(empty); chmodSync(empty, 0o750)
+      ok(privateDir(empty, false) === 'tightened' && mode(empty) === 0o700, 'a chosen folder that is empty is tightened')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   }
   // /v1/file: the file asked for must itself be a picture under the home or temp folders.
   {
@@ -882,6 +950,17 @@ function rules() {
       ok(servableImage(join(dir, 'secret.txt'), home, real) === null && servableImage(join(dir, 'none.png'), home, real) === null, 'a file that is not a picture, or not there, is refused')
       ok(servableImage(join(dir, '..', 'a.png'), home, real) === null && servableImage('a.png', home, real) === null, 'a path that leaves the folder or is not absolute is refused')
       ok(servableImage(join(dir, 'a.png'), '/nowhere', (p) => p.replace(home, '/Users/x/.ssh')) === null, 'a picture in a folder of secrets is refused')
+      // What bots really write: a picture named through /tmp or /var (links to /private on a Mac), a scratch folder
+      // under /private/tmp, and a home folder that is itself reached through a link.
+      const sys = (p: string) => p.replace(/^\/tmp\//, '/private/tmp/').replace(/^\/var\//, '/private/var/')
+      ok(servableImage('/tmp/shot.png', '/Users/x', sys) === '/private/tmp/shot.png', 'a picture asked for under /tmp is served from /private/tmp')
+      ok(servableImage('/var/folders/ab/T/shot.jpg', '/Users/x', sys) === '/private/var/folders/ab/T/shot.jpg', 'a picture asked for under /var/folders is served')
+      ok(servableImage('/private/tmp/claude-501/-Users-x/scratchpad/a.PNG', '/Users/x', sys) === '/private/tmp/claude-501/-Users-x/scratchpad/a.PNG', 'a picture in a scratch folder is served')
+      ok(servableImage('/Users/x/.t3/userdata/attachments/a-b.png', '/Users/x', sys) === '/Users/x/.t3/userdata/attachments/a-b.png', 'a T3 Code attachment is served')
+      ok(servableImage('/Users/x/.local/share/t3bot/uploads/2026-11-11-a.jpg', '/Users/x', sys) === '/Users/x/.local/share/t3bot/uploads/2026-11-11-a.jpg', 'a photo sent from the phone is served')
+      ok(servableImage('/home/x/a.png', '/home/x', (p) => p.replace(/^\/home\//, '/var/home/')) === '/var/home/x/a.png', 'a home folder reached through a link is still the home')
+      ok(servableImage('/etc/a.png', '/', sys) === null && servableImage('/etc/a.png', '', sys) === null, 'an empty home folder opens nothing')
+      ok(servableImage(join(dir, 'a.png'), '/nowhere', real) === join(home, 'a.png'), 'a picture in the real temp folder of this machine is served')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   }
   for (const bad of [null, 'x', [], {}, { title: '' }, { title: [] }, { title: 'x', kind: 'nope' }, { title: 'x', kind: 5 }, { title: 'x', kind: '' }]) {

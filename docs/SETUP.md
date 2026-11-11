@@ -10,7 +10,7 @@ To have your coding agent do it, paste the prompt from the [README](../README.md
 
 | | Why |
 |---|---|
-| T3 Code running on your computer, with at least one project | The app pairs with it |
+| T3 Code 0.1.0 or later running on your computer, with at least one project | The app pairs with it. An older T3 Code is refused at pairing |
 | A Mac with Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) | Builds the app. `brew install xcodegen` |
 | An iPhone on iOS 26 | The app is iPhone only |
 | A paid Apple Developer account | Signing the app's notification entitlements. There is no TestFlight or App Store build |
@@ -376,6 +376,7 @@ Paired with T3 Code:
 | Symptom | Likely cause |
 |---|---|
 | The code is refused when you scan or type it | A code works once and for a few minutes. Create a new link in T3 Code |
+| "This T3 Code is too old" | It is older than 0.1.0. Update T3 Code on your Mac, then pair again |
 | "This T3 Code is too new" | T3 Code changed its protocol. Pull the latest T3 Bot and build again |
 | "refused this phone's token. Pair again to carry on." | The 30 days are over, or the phone was removed under Sharing & access. Pair again |
 | The app cannot reach T3 Code away from home | The pairing uses a home network address. Pair again with your T3 Connect or Tailscale address |

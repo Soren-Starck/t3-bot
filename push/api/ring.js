@@ -24,23 +24,29 @@ export default post('ring', 120, async (b, req, res) => {
   if (tooMany(`phone:${phone}`, 30)) { res.setHeader('retry-after', '60'); return reply(res, 429, { ok: false, code: 'too_many', error: 'too many pushes' }) }
 
   // Apple refused this token a moment ago: the same answer, without asking Apple again.
-  if (isGone(phone)) return reply(res, 410, { ok: false, gone: true, code: 'gone', error: 'Unregistered' })
+  // Remembered per app: a token that is not one app's can be another's.
+  const seen = `${phone}:${to.b}`
+  if (isGone(seen)) return reply(res, 410, { ok: false, gone: true, code: 'gone', error: 'Unregistered' })
 
   const collapseId = crypto.createHash('sha256').update(`${thread}|${b.kind}`).digest('hex').slice(0, 32)
   const push = { token: to.t, topic: to.b, payload: ringPayload(b.kind, thread), collapseId }
   const started = Date.now()
   let r = await apns.send({ ...push, env: to.e })
+  let refusedByBoth = false
   // A token belongs to one of Apple's two environments. A build that names the wrong one (a TestFlight build
   // that says sandbox) gets BadDeviceToken there, so the other is tried once before the phone is called gone.
   if (r.status === 400 && r.reason === 'BadDeviceToken' && Date.now() - started < 2500) {
     const other = to.e === 'production' ? 'sandbox' : 'production'
     const second = await apns.send({ ...push, env: other, budgetMs: 2500 })
     if (second.status === 200) r = second
+    else refusedByBoth = second.status === 410 || GONE.includes(second.reason)
   }
   if (r.status === 200) return reply(res, 200, { ok: true })
 
   console.warn(`push ring: ${b.kind} refused (${r.status} ${r.reason || 'no reason'})`)
-  if (r.status === 410 || GONE.includes(r.reason)) markGone(phone)
+  // Remembered only when no environment can take the token: Apple knew it and says it is gone or another app's,
+  // or both environments refused it. One environment refusing while the other did not answer proves nothing.
+  if (r.status === 410 || r.reason === 'Unregistered' || r.reason === 'DeviceTokenNotForTopic' || refusedByBoth) markGone(seen)
   if (r.status === 410 || GONE.includes(r.reason)) return reply(res, 410, { ok: false, gone: true, code: 'gone', error: r.reason || 'Unregistered' })
   if (r.status === 429) { res.setHeader('retry-after', '60'); return reply(res, 429, { ok: false, code: 'too_many', error: r.reason || 'too many pushes' }) }
   // Apple refuses the sender itself: its key, key id, team id, or the bundle id.
