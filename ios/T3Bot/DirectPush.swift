@@ -71,38 +71,15 @@ enum DirectPush {
         return a
     }
 
-    /// The Claude provider instances of this T3 Code, with their settings entries (an implicit default instance has
-    /// none yet and gets one). An entry with environment values is left alone: they come back hidden and would be lost.
+    /// The Claude provider instances of this T3 Code, with their settings entries as read (HookSettings holds the
+    /// rules: an entry with environment values is left alone, and nothing read is dropped).
     private static func claudeInstances(_ b: DirectBackend) async throws -> [(id: String, entry: [String: Any])] {
         let v = try await b.call("server.getConfig", [:]) as? [String: Any] ?? [:]
-        let configured = ((v["settings"] as? [String: Any])?["providerInstances"] as? [String: Any]) ?? [:]
-        let providers = (v["providers"] as? [[String: Any]]) ?? []
-        var ids = providers.filter { ($0["driver"] as? String) == "claudeAgent" }.compactMap { $0["instanceId"] as? String }
-        for (id, e) in configured where ((e as? [String: Any])?["driver"] as? String) == "claudeAgent" && !ids.contains(id) { ids.append(id) }
-        return ids.compactMap { id in
-            var entry = (configured[id] as? [String: Any]) ?? ["driver": "claudeAgent", "enabled": true, "config": [String: Any]()]
-            if let env = entry["environment"] as? [String: Any], !env.isEmpty { return nil }
-            if let env = entry["environment"] as? [Any], !env.isEmpty { return nil }
-            entry["environment"] = nil
-            return (id, entry)
-        }
+        return HookSettings.claudeInstances(in: v)
     }
 
-    /// True when a provider instance carries a secret anywhere but its launch arguments: a key named for one
-    /// (secret, token, password, api key) with a value, at any depth.
-    static func holdsSecret(_ value: Any, key: String = "") -> Bool {
-        let k = key.lowercased()
-        if ["secret", "password", "apikey", "api_key"].contains(where: { k.contains($0) }) {
-            if value is NSNull || value is Bool { return false }
-            if let t = value as? String { return !t.isEmpty }
-            if let d = value as? [String: Any] { return !d.isEmpty }
-            if let a = value as? [Any] { return !a.isEmpty }
-            return true
-        }
-        if let d = value as? [String: Any] { return d.contains { name, v in name != "launchArgs" && holdsSecret(v, key: name) } }
-        if let a = value as? [Any] { return a.contains { holdsSecret($0) } }
-        return false
-    }
+    /// True when a provider instance carries a secret anywhere but its launch arguments (HookSettings.holdsSecret).
+    static func holdsSecret(_ value: Any, key: String = "") -> Bool { HookSettings.holdsSecret(value, key: key) }
 
     /// Puts this phone's address in the hooks of every Claude provider (or takes it out with `remove`), with the
     /// bots of now. Returns how many providers ring this phone.
@@ -122,8 +99,7 @@ enum DirectPush {
         var blocked: [String] = []
         var secret: [String] = []
         for (id, entry) in instances {
-            var config = (entry["config"] as? [String: Any]) ?? [:]
-            let args = (config["launchArgs"] as? String) ?? ""
+            let args = ((entry["config"] as? [String: Any])?["launchArgs"] as? String) ?? ""
             var addresses = HookSettings.addresses(in: args)
             // This phone's address keeps its place: moving it to the end made two phones paired with the same
             // T3 Code rewrite each other's order for ever.
@@ -139,16 +115,14 @@ enum DirectPush {
             }
             if !remove { ringing += 1 }
             guard next != args else { continue }
-            // The whole instance goes back with the write. One that holds a secret (a reference on a newer T3 Code,
-            // a hidden value on an older one) is left alone: what was read may not be what T3 Code keeps.
-            if holdsSecret(entry) {
+            // The whole instance goes back with the write, as read, with only its launch arguments changed. One that
+            // holds a secret (a reference on a newer T3 Code, a hidden value on an older one) is left alone: what was
+            // read may not be what T3 Code keeps.
+            guard let instance = HookSettings.rewritten(entry, launchArgs: next) else {
                 if !remove { ringing -= 1 }
                 secret.append(id)
                 continue
             }
-            config["launchArgs"] = next
-            var instance = entry
-            instance["config"] = config
             do {
                 _ = try await b.call("server.updateSettings", ["patch": [String: Any](),
                                                                "providerInstanceMutation": ["operation": "upsert", "instanceId": id, "instance": instance]])

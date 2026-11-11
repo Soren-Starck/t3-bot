@@ -85,3 +85,69 @@ enum HookSettings {
         return base.isEmpty ? ours : base + " " + ours
     }
 }
+
+// The read and the write of a Claude provider instance. T3 Code's `upsert` replaces the whole instance with what
+// the client sends (serverSettings.ts, applyProviderInstanceMutation), so the instance goes back exactly as it was
+// read, unknown keys included, with `config.launchArgs` the only change. An instance that carries anything secret
+// or hidden is never written: what was read may not be what T3 Code keeps.
+extension HookSettings {
+    /// What T3 Code shows a client in place of a saved secret (settingsSecrets.ts, SECRET_REDACTED).
+    static let redactedSecret = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"
+
+    /// The Claude provider instances in a `server.getConfig` answer, each with its settings entry as read (an
+    /// implicit default instance has none yet and gets one). An entry with environment values is left out: the
+    /// sensitive ones come back hidden or as a reference, and a write would have to send them back untouched.
+    static func claudeInstances(in v: [String: Any]) -> [(id: String, entry: [String: Any])] {
+        let configured = ((v["settings"] as? [String: Any])?["providerInstances"] as? [String: Any]) ?? [:]
+        let providers = (v["providers"] as? [[String: Any]]) ?? []
+        var ids = providers.filter { ($0["driver"] as? String) == "claudeAgent" }.compactMap { $0["instanceId"] as? String }
+        for id in configured.keys.sorted() where ((configured[id] as? [String: Any])?["driver"] as? String) == "claudeAgent" && !ids.contains(id) { ids.append(id) }
+        return ids.compactMap { id in
+            let entry = (configured[id] as? [String: Any]) ?? ["driver": "claudeAgent", "enabled": true, "config": [String: Any]()]
+            if let env = entry["environment"] {
+                // Only an empty list (or an empty object) is safe to send back; any other shape is not ours to guess.
+                if let a = env as? [Any] { if !a.isEmpty { return nil } }
+                else if let d = env as? [String: Any] { if !d.isEmpty { return nil } }
+                else { return nil }
+            }
+            return (id, entry)
+        }
+    }
+
+    /// True when a provider instance carries a secret anywhere but its launch arguments: a key named for one
+    /// (secret, password, api key) with a value, T3 Code's marker for a hidden secret, a hidden environment value,
+    /// or a reference to a secret provider (`{provider, reference}`, secretReference.ts), at any depth.
+    static func holdsSecret(_ value: Any, key: String = "") -> Bool {
+        let k = key.lowercased()
+        if ["secret", "password", "apikey", "api_key"].contains(where: { k.contains($0) }) {
+            if value is NSNull || value is Bool { return false }
+            if let t = value as? String { return !t.isEmpty }
+            if let d = value as? [String: Any] { return !d.isEmpty }
+            if let a = value as? [Any] { return !a.isEmpty }
+            return true
+        }
+        if let t = value as? String { return t == redactedSecret }
+        if let d = value as? [String: Any] {
+            if d["provider"] is String, d["reference"] is String { return true }
+            if (d["valueRedacted"] as? Bool) == true { return true }
+            return d.contains { name, v in name != "launchArgs" && holdsSecret(v, key: name) }
+        }
+        if let a = value as? [Any] { return a.contains { holdsSecret($0) } }
+        return false
+    }
+
+    /// The instance to send with the upsert: the entry as read, with `config.launchArgs` the only change. Nil when
+    /// it must not be written (it holds a secret, or its config is not an object).
+    static func rewritten(_ entry: [String: Any], launchArgs: String) -> [String: Any]? {
+        if holdsSecret(entry) { return nil }
+        var config: [String: Any] = [:]
+        if let c = entry["config"], !(c is NSNull) {
+            guard let d = c as? [String: Any] else { return nil }
+            config = d
+        }
+        config["launchArgs"] = launchArgs
+        var instance = entry
+        instance["config"] = config
+        return instance
+    }
+}

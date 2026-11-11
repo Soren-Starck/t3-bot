@@ -663,3 +663,92 @@ final class BackoffTests: XCTestCase {
         XCTAssertFalse(slots.end("never-started", 1))
     }
 }
+
+/// The hook write against T3 Code's real settings shapes (contracts/providerInstance.ts, settings.ts ClaudeSettings,
+/// secretReference.ts and server settingsSecrets.ts on main, 11 Nov 2026). T3 Code's upsert replaces the instance,
+/// so what the app sends must be what it read, with only `config.launchArgs` changed.
+final class ProviderSecretWriteTests: XCTestCase {
+    /// `server.getConfig` as main answers a client without the settingsSecretReferences capability.
+    private let mainConfig = #"""
+    {"providers":[{"instanceId":"claudeAgent","driver":"claudeAgent"},{"instanceId":"claude_work","driver":"claudeAgent"},
+                  {"instanceId":"claude_env","driver":"claudeAgent"},{"instanceId":"claude_ref","driver":"claudeAgent"},
+                  {"instanceId":"codex","driver":"codex"}],
+     "settings":{"providerInstances":{
+       "claude_work":{"driver":"claudeAgent","displayName":"Work","accentColor":"#7c3aed","enabled":false,"environment":[],
+         "futureEnvelopeKey":{"a":[1,2.5,null,true],"b":"x"},
+         "config":{"binaryPath":"/opt/homebrew/bin/claude","homePath":"~/.claude-work",
+           "customModels":[{"slug":"claude-x","name":"X","contextWindow":1000000}],
+           "launchArgs":"--chrome --model 'opus 5'","autoCompactWindow":"300000","idleCompaction":"inherit",
+           "futureConfigKey":{"nested":[{"k":"v"}],"n":0,"f":false}}},
+       "claude_env":{"driver":"claudeAgent","enabled":true,"config":{"launchArgs":""},
+         "environment":[{"name":"ANTHROPIC_BASE_URL","value":"https://gw.example","sensitive":false},
+                        {"name":"ANTHROPIC_API_KEY","value":"","sensitive":true,"valueRedacted":true}]},
+       "claude_ref":{"driver":"claudeAgent","enabled":true,"config":{"launchArgs":""},
+         "environment":[{"name":"ANTHROPIC_API_KEY","value":"","sensitive":true,"secret":{"provider":"1Password","reference":"op://vault/item/key"}}]},
+       "codex":{"driver":"codex","enabled":true,"config":{"launchArgs":""}}}}}
+    """#
+
+    private func object(_ json: String) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+    }
+    private func bytes(_ value: Any) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed]), as: UTF8.self)
+    }
+
+    func testTheHookWriteSendsBackEveryFieldItReadUnchanged() throws {
+        let instances = HookSettings.claudeInstances(in: try object(mainConfig))
+        // The two instances with environment values, hidden or referenced, are never written; nor is another driver's.
+        XCTAssertEqual(instances.map(\.id), ["claudeAgent", "claude_work"])
+        let read = try XCTUnwrap(instances.first { $0.id == "claude_work" }).entry
+        let args = try XCTUnwrap((read["config"] as? [String: Any])?["launchArgs"] as? String)
+        let ring = try XCTUnwrap(URL(string: "https://push.example/api/ring"))
+        let next = try HookSettings.merged(args, ring: ring, addresses: ["a1"], bots: ["t1"])
+        let sent = try XCTUnwrap(HookSettings.rewritten(read, launchArgs: next))
+
+        // Against the JSON itself, not the app's reading of it.
+        let original = try XCTUnwrap(((try object(mainConfig)["settings"] as? [String: Any])?["providerInstances"] as? [String: Any])?["claude_work"] as? [String: Any])
+        XCTAssertEqual(Set(sent.keys), Set(original.keys))
+        for (key, value) in original where key != "config" {
+            XCTAssertEqual(try bytes(XCTUnwrap(sent[key])), try bytes(value), key)
+        }
+        let config = try XCTUnwrap(sent["config"] as? [String: Any]), before = try XCTUnwrap(original["config"] as? [String: Any])
+        XCTAssertEqual(Set(config.keys), Set(before.keys))
+        for (key, value) in before where key != "launchArgs" {
+            XCTAssertEqual(try bytes(XCTUnwrap(config[key])), try bytes(value), key)
+        }
+        XCTAssertEqual(config["launchArgs"] as? String, next)
+        XCTAssertTrue(next.hasPrefix("--chrome --model 'opus 5' --settings '"))
+        // Taking the hooks out gives back the instance byte for byte.
+        let undone = try XCTUnwrap(HookSettings.rewritten(sent, launchArgs: HookSettings.strip(next)))
+        XCTAssertEqual(try bytes(undone), try bytes(original))
+        // The implicit default instance (no settings entry) is created with nothing invented beyond the three keys.
+        let implicit = try XCTUnwrap(instances.first { $0.id == "claudeAgent" }).entry
+        XCTAssertEqual(try bytes(XCTUnwrap(HookSettings.rewritten(implicit, launchArgs: "x"))),
+                       #"{"config":{"launchArgs":"x"},"driver":"claudeAgent","enabled":true}"#)
+    }
+
+    func testAnInstanceWithAnythingSecretIsNeverWritten() throws {
+        let marker = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"
+        XCTAssertEqual(HookSettings.redactedSecret, marker)
+        let refused: [String] = [
+            // A secret config field as main shows it to a client without the capability (SECRET_REDACTED).
+            #"{"driver":"claudeAgent","config":{"launchArgs":"","gatewayCredential":"\#(marker)"}}"#,
+            // The same field as a reference, for a client with the capability.
+            #"{"driver":"claudeAgent","config":{"launchArgs":"","gatewayCredential":{"provider":"vault","reference":"kv/claude"}}}"#,
+            // Per-host secret fields.
+            #"{"driver":"claudeAgent","config":{"launchArgs":"","credentials":{"github.com":"\#(marker)"}}}"#,
+            // Environment rows, should one ever reach the write.
+            #"{"driver":"claudeAgent","config":{},"environment":[{"name":"K","value":"","sensitive":true,"valueRedacted":true}]}"#,
+            #"{"driver":"claudeAgent","config":{},"environment":[{"name":"K","value":"","sensitive":true,"secret":{"provider":"p","reference":"r"}}]}"#,
+            #"{"driver":"claudeAgent","config":{"apiKey":"sk"}}"#,
+            // A config that is not an object cannot be edited without replacing it.
+            #"{"driver":"claudeAgent","config":"opaque"}"#,
+        ]
+        for json in refused { XCTAssertNil(HookSettings.rewritten(try object(json), launchArgs: "x"), json) }
+        // An environment of an unknown shape keeps the instance out of the list altogether.
+        let odd = try object(#"{"settings":{"providerInstances":{"c":{"driver":"claudeAgent","environment":"X=1","config":{}}}}}"#)
+        XCTAssertTrue(HookSettings.claudeInstances(in: odd).isEmpty)
+        // Launch arguments are the person's own text and never count as a secret.
+        XCTAssertNotNil(HookSettings.rewritten(try object(#"{"driver":"claudeAgent","config":{"launchArgs":"--password-file x \#(marker)"}}"#), launchArgs: "x"))
+    }
+}
